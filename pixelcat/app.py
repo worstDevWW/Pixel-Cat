@@ -27,7 +27,8 @@ from .engine.states import S
 from .engine.surfaces import SurfaceMap
 from .desktop.escwatch import EscWatcher
 from .llm.agent import ToolOutput
-from .llm.ollama_client import ChatWorker, friendly_error, parse_text_tool_calls, preload_model, strip_tool_markup
+from .llm.model_status import ModelStatus
+from .llm.ollama_client import ChatWorker, friendly_error, parse_text_tool_calls, strip_tool_markup
 from .llm.prompt import build_system_prompt
 from .llm.tools import AppHooks, ToolBox, ToolError, ToolSpec
 from .desktop import notifications
@@ -127,6 +128,9 @@ class PixelCatApp(QObject):
         self.tray.messageClicked.connect(self.open_chat)
 
         # chat / tools state
+        # the AI: Ollama started and the model loaded in the background, status shown in the chat
+        self.model_status = ModelStatus(cfg, may_download=lambda: self.saved.model_download_ok)
+        self.model_status.changed.connect(self._on_model_status)
         self.watches = WatchManager(self.own_pid)        # long tasks: wait_for watches in the background
         self.watches.fired.connect(self._on_watch_fired)
         self.watches.changed.connect(self._on_watches_changed)
@@ -198,7 +202,8 @@ class PixelCatApp(QObject):
     def ui_unit(self, mon: Monitor) -> int:
         return max(2, int(round(2 * mon.dpi / 96.0)))
 
-    def start(self) -> None:
+    def start(self, warm_model: bool = False) -> None:
+        """``warm_model``: start Ollama and load the model in the background (the real app)."""
         t0 = time.perf_counter()
         mon = primary(self.monitors)
         n = self.sprites.prewarm(all_poses(), self.scale_for(mon))
@@ -225,6 +230,8 @@ class PixelCatApp(QObject):
             self.watches.restore(self.saved.watches)   # long tasks from before a restart keep going
         if self.selftest:
             QTimer.singleShot(int(self.selftest * 1000), self._selftest_finish)
+        if warm_model and self.cfg.preload_on_start and not self.selftest:
+            QTimer.singleShot(3000, self.model_status.ensure)   # after the cat is on screen
         log.info("Pixel Cat started (pid %s)", self.own_pid)
 
     def _place_initial(self) -> None:
@@ -257,6 +264,7 @@ class PixelCatApp(QObject):
             self.agent.cancel.set()
             self.esc_watch.stop()
             self.watches.stop()
+            self.model_status.stop()
             if self.worker is not None:
                 self.worker.cancel()
                 self.worker.wait(1500)
@@ -402,6 +410,8 @@ class PixelCatApp(QObject):
     def _sync_tray(self) -> None:
         n = len(self.watches.active())
         status = self.brain.status() + (f" - watching {n} thing{'s' if n != 1 else ''}" if n else "")
+        ai = self.model_status.short()
+        status += f" - {ai}" if ai else ""
         self.tray.sync(self.brain.paused, self.quiet, status)
 
     # ================================================================ drag & drop
@@ -500,6 +510,7 @@ class PixelCatApp(QObject):
             self.chat.watch_cancel_requested.connect(self._cancel_watch)
             self.chat.set_auto_mode(self.saved.auto_mode)
             self.chat.set_watches([(w.id, w.short()) for w in self.watches.active()])
+            self.chat.set_model_banner(self.model_status.banner())
         return self.chat
 
     def _show_chat_quietly(self) -> None:
@@ -517,9 +528,8 @@ class PixelCatApp(QObject):
         assert self.chat is not None
         mon = monitor_at(self.monitors, self.brain.x, self.brain.y - 1)
         self.chat.show_near(self.overlay.cat_rect(), mon.work, self.ui_unit(mon))
-        if not self.selftest and time.monotonic() - getattr(self, "_preloaded", -1e9) > 120:
-            self._preloaded = time.monotonic()
-            preload_model(self.cfg)   # warm the model up while the user types
+        if not self.selftest:
+            self.model_status.ensure()   # Ollama and the model up? (if not: started, and the chat says so)
 
     def new_chat(self) -> None:
         """Forget the conversation (frees the model's context) and start fresh."""
@@ -632,6 +642,14 @@ class PixelCatApp(QObject):
             assert self.chat is not None
             self.chat.add("info", "Okay! I'll ask before every action again 🐾")
             return True
+        if cmd in ("/getmodel", "/get model", "/downloadmodel", "/download-model"):
+            assert self.chat is not None
+            self.saved.model_download_ok = True
+            self.save()
+            self.chat.add("info", f"Okay! I'll download the AI model {self.cfg.model} now - the bar above shows "
+                                  "how far it is. You can keep using your PC meanwhile.")
+            self.model_status.ensure(force=True)
+            return True
         if cmd in ("/watches", "/watching", "/waits"):
             assert self.chat is not None
             act = self.watches.active()
@@ -650,7 +668,8 @@ class PixelCatApp(QObject):
             assert self.chat is not None
             self.chat.add("info", "Commands: /new (fresh chat), /auto on|off (no permission cards), "
                                   "/force end <app> (like Task Manager), /force open <app> (as admin), "
-                                  "/watches, /unwatch, /permissions, /permissions reset. "
+                                  "/watches, /unwatch, /getmodel (download the AI model), /permissions, "
+                                  "/permissions reset. "
                                   "Ask me to open, close, switch or minimize apps, search the web, control music, "
                                   "take screenshots, set timers, check the system and more! I can also SEE your "
                                   "screen and use apps for you (click, type, shortcuts) - e.g. 'open Notepad and "
@@ -1162,6 +1181,11 @@ class PixelCatApp(QObject):
         if self.chat is not None:
             self.chat.set_watches([(w.id, w.short()) for w in self.watches.active()])
         self.save()       # watches survive a restart
+        self._sync_tray()
+
+    def _on_model_status(self) -> None:
+        if self.chat is not None:
+            self.chat.set_model_banner(self.model_status.banner())
         self._sync_tray()
 
     def _cancel_watch(self, wid: int) -> None:

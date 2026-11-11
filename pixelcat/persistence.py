@@ -29,6 +29,7 @@ class SavedState:
     feeds: int = 0
     plays: int = 0
     best_round: int = 0                      # most rounds in one ball game
+    model_download_ok: bool = False          # the user agreed to download the AI model (installer, /getmodel)
     auto_approved_tools: list[str] = field(default_factory=list)  # chat tools the user said ALWAYS to
     auto_mode: bool = False                  # chat actions run without confirmation cards
     watches: list[dict[str, Any]] = field(default_factory=list)   # wait_for watches (long tasks) to resume

@@ -132,6 +132,10 @@ class ChatWindow(QWidget):
         self.watch_bar.linkActivated.connect(self._watch_link)
         self.watch_bar.hide()
         self._watch_items: list[tuple[int, str]] = []
+        # the AI's state while it isn't ready ("Model is starting up, please wait…", downloads)
+        self.model_bar = QLabel()
+        self.model_bar.setWordWrap(True)
+        self.model_bar.hide()
         self.input = QLineEdit()
         self.input.setPlaceholderText("Talk to the cat… (Ctrl+N: new chat)")
         self.input.returnPressed.connect(self._send)
@@ -142,6 +146,7 @@ class ChatWindow(QWidget):
         row.addWidget(self.send_btn)
         self.lay = QVBoxLayout(self)
         self.lay.addWidget(self.view, 1)
+        self.lay.addWidget(self.model_bar)
         self.lay.addWidget(self.watch_bar)
         self.lay.addWidget(self.confirm)
         self.lay.addLayout(row)
@@ -161,6 +166,8 @@ class ChatWindow(QWidget):
         self.setStyleSheet(theme.chat_stylesheet(max(1, u // 2 + (u % 2)), self.font_px))
         self.confirm_label.setStyleSheet(f"color:#3a2129; font-family:'Segoe UI'; font-size:{self.font_px}px;")
         self.watch_bar.setStyleSheet(f"color:#3a2129; background:#fff3c4; font-family:'Segoe UI'; "
+                                     f"font-size:{self.small_px}px; padding:{2 * u}px;")
+        self.model_bar.setStyleSheet(f"color:#21374a; background:#dcefff; font-family:'Segoe UI'; "
                                      f"font-size:{self.small_px}px; padding:{2 * u}px;")
         if getattr(self, "_watch_items", None):
             self.set_watches(self._watch_items)
@@ -241,6 +248,14 @@ class ChatWindow(QWidget):
     def set_auto_mode(self, on: bool) -> None:
         self.auto_mode = on
         self.update()
+
+    def set_model_banner(self, text: str | None) -> None:
+        """Show what the AI is doing while it isn't ready; None hides the bar."""
+        if text:
+            self.model_bar.setText(text)
+            self.model_bar.show()
+        else:
+            self.model_bar.hide()
 
     def set_watches(self, items: list[tuple[int, str]]) -> None:
         """Show what the cat waits for (id, description); empty hides the bar."""

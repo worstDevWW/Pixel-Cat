@@ -31,6 +31,8 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true", help="with --install/--uninstall: no window")
     parser.add_argument("--no-desktop-shortcut", action="store_true", help="with --install --quiet")
     parser.add_argument("--launch", action="store_true", help="with --install --quiet: start the cat afterwards")
+    parser.add_argument("--with-ai", action="store_true",
+                        help="with --install --quiet: also install Ollama and let the cat download the model")
     parser.add_argument("--delete-data", action="store_true",
                         help="with --uninstall --quiet: also delete the cat's settings and memory")
     args = parser.parse_args()
@@ -96,7 +98,7 @@ def main() -> int:
     for scr in qapp.screens():
         log.info("qt screen %s geometry=%s dpr=%.2f", scr.name(), scr.geometry().getRect(), scr.devicePixelRatio())
     pet = PixelCatApp(qapp, cfg, saved, selftest=args.selftest)
-    pet.start()
+    pet.start(warm_model=True)
     code = qapp.exec()
     log.info("bye (exit code %s)", code)
     logging.shutdown()

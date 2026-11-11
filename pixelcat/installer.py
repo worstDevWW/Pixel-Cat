@@ -278,6 +278,162 @@ def launch(exe: Path) -> None:
             continue
 
 
+# ---------------------------------------------------------------- the AI part (Ollama + model)
+OLLAMA_SETUP_URL = "https://ollama.com/download/OllamaSetup.exe"   # Ollama's own link (their GitHub release)
+OLLAMA_SIGNER = "CN=Ollama Inc."                                    # whose signature the installer must carry
+OLLAMA_SETUP_GB = 1.9
+MODEL_GB = 22.0          # qwen3.5:35b-a3b, the model in the bundled config.json
+MODEL_RAM_GB = 24.0      # what it takes while loaded (64k context)
+
+
+def total_ram_gb() -> float:
+    try:
+        import ctypes
+
+        class _MS(ctypes.Structure):
+            _fields_ = [("len", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                        ("avail", ctypes.c_ulonglong), ("tp", ctypes.c_ulonglong), ("ap", ctypes.c_ulonglong),
+                        ("tv", ctypes.c_ulonglong), ("av", ctypes.c_ulonglong), ("ax", ctypes.c_ulonglong)]
+
+        m = _MS()
+        m.len = ctypes.sizeof(_MS)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+        return m.total / 2**30
+    except Exception:  # noqa: BLE001
+        return 16.0
+
+
+@dataclass
+class AiPlan:
+    ollama: Path | None        # Ollama on this PC
+    model: str                 # always the bundled one: qwen3.5:35b-a3b
+    model_ready: bool          # already downloaded
+    ram_gb: float
+
+    @property
+    def needed(self) -> bool:
+        return self.ollama is None or not self.model_ready
+
+    def describe(self) -> str:
+        low = (f" This PC has {self.ram_gb:.0f} GB of RAM, so the AI will be very slow or may not start."
+               if self.ram_gb < MODEL_RAM_GB + 4 else "")
+        model = (f"The model {self.model} ({MODEL_GB:g} GB; it needs about {MODEL_RAM_GB:g} GB of free RAM while "
+                 f"it runs) then downloads in the background while the cat runs.{low}")
+        if self.ollama is None:
+            head = f"Gets Ollama, the free AI engine ({OLLAMA_SETUP_GB:g} GB from ollama.com, no admin rights)."
+            return head if self.model_ready else f"{head} {model}"
+        return f"Ollama is already here. {model}"
+
+
+def ai_plan(lay: Layout) -> AiPlan:
+    """What the AI part has to do on this PC.  The model is always the one in the bundled
+    config.json (qwen3.5:35b-a3b), with the same settings everywhere."""
+    from .llm.model_status import find_ollama_app, model_on_disk
+    from .settings import Config
+
+    model = Config().model
+    return AiPlan(find_ollama_app(), model, model_on_disk(model), total_ram_gb())
+
+
+def download(url: str, dest: Path, progress: Callable[[int, int], None], cancel: threading.Event) -> None:
+    import requests
+
+    tmp = dest.with_name(dest.name + ".part")
+    done = 0
+    with requests.get(url, stream=True, timeout=(15, 120)) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("Content-Length") or 0)
+        with open(tmp, "wb") as fh:
+            for chunk in r.iter_content(1 << 20):
+                if cancel.is_set():
+                    raise InstallError("cancelled")
+                fh.write(chunk)
+                done += len(chunk)
+                progress(done, total)
+    os.replace(tmp, dest)
+
+
+def signature_of(path: Path) -> tuple[str, str]:
+    """(status, signer) of a program's digital signature, as Windows checks it."""
+    env = dict(os.environ, PIXELCAT_SIGNED_FILE=str(path))
+    ps = ("$s = Get-AuthenticodeSignature -LiteralPath $env:PIXELCAT_SIGNED_FILE; "
+          "[string]$s.Status; [string]$s.SignerCertificate.Subject")
+    r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], env=env,
+                       capture_output=True, text=True, timeout=60, creationflags=0x08000000)
+    lines = (r.stdout or "").splitlines() + ["", ""]
+    return lines[0].strip(), lines[1].strip()
+
+
+def check_ollama_setup(path: Path) -> None:
+    """Only ever run a downloaded installer that Windows confirms is signed by Ollama."""
+    status, signer = signature_of(path)
+    if status != "Valid" or not signer.startswith(OLLAMA_SIGNER + ","):
+        raise InstallError(f"the downloaded file isn't signed by Ollama ({status or 'no signature'}"
+                           f"{', ' + signer.split(',')[0] if signer else ''}), so I didn't run it")
+    if elevation.exe_needs_admin(str(path)):
+        raise InstallError("Ollama's installer wants admin rights this time - please install Ollama yourself "
+                           "from ollama.com")
+
+
+def run_ollama_setup(path: Path) -> None:
+    r = subprocess.run([str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], timeout=1800)
+    if r.returncode != 0:
+        raise InstallError(f"Ollama's installer stopped (code {r.returncode})")
+
+
+def _save_ai_choice(lay: Layout, plan: AiPlan) -> None:
+    """The user agreed: the cat may download the model."""
+    import json
+
+    lay.data_dir.mkdir(parents=True, exist_ok=True)
+    state_path = lay.data_dir / "state.json"
+    try:
+        state = json.loads(state_path.read_text("utf-8")) if state_path.is_file() else {}
+    except (OSError, ValueError):
+        state = {}
+    state["model_download_ok"] = True
+    tmp = state_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2), "utf-8")
+    os.replace(tmp, state_path)
+
+
+def setup_ai(lay: Layout, plan: AiPlan, progress: Callable[[str], None], cancel: threading.Event,
+             url: str = OLLAMA_SETUP_URL, runner: Callable[[Path], None] = run_ollama_setup,
+             finder: Callable[[], Path | None] | None = None) -> str:
+    """Install Ollama if needed and let the cat download the model.  Returns a note for the user."""
+    import tempfile
+
+    from .llm.model_status import find_ollama_app
+
+    finder = finder or find_ollama_app
+    if plan.ollama is None:
+        dest = Path(tempfile.gettempdir()) / "PixelCat-OllamaSetup.exe"
+        try:
+            def show(done: int, total: int) -> None:
+                pct = f"{int(100 * done / total)}% " if total else ""
+                tot = f" of {total / 1e9:.1f}" if total else ""
+                progress(f"Downloading Ollama… {pct}({done / 1e9:.1f}{tot} GB)")
+            download(url, dest, show, cancel)
+            progress("Checking that it really comes from Ollama…")
+            check_ollama_setup(dest)
+            progress("Installing Ollama… (about a minute)")
+            runner(dest)
+        finally:
+            for p in (dest, dest.with_name(dest.name + ".part")):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        if finder() is None:
+            raise InstallError("Ollama's installer finished, but I can't find Ollama")
+        log.info("Ollama installed")
+    _save_ai_choice(lay, plan)
+    if plan.model_ready:
+        return "The AI chat is ready."
+    return (f"The AI model {plan.model} ({MODEL_GB:g} GB) downloads in the background while the cat runs - "
+            "the chat shows how far it is.")
+
+
 # ---------------------------------------------------------------- quiet mode (no window)
 def run_quiet(args: Any) -> int:
     lay = layout()
@@ -294,9 +450,18 @@ def run_quiet(args: Any) -> int:
     except (InstallError, OSError) as exc:
         log.error("install failed: %s", exc)
         return 1
+    rc = 0
+    if getattr(args, "with_ai", False):
+        plan = ai_plan(lay)
+        if plan.needed:
+            try:
+                log.info(setup_ai(lay, plan, log.info, threading.Event()))
+            except Exception as exc:  # noqa: BLE001 - the cat itself is installed
+                log.error("AI setup failed: %s", exc)
+                rc = 3
     if getattr(args, "launch", False):
         launch(exe)
-    return 0
+    return rc
 
 
 # ---------------------------------------------------------------- the window
@@ -355,6 +520,15 @@ def _make_window_class():  # type: ignore[no-untyped-def]
             self.text.setWordWrap(True)
             self.text.setTextFormat(Qt.TextFormat.RichText)
             self.box = QCheckBox()
+            self.ai_box = QCheckBox()           # set up Ollama + the model too
+            self.ai_note = QLabel()
+            self.ai_note.setWordWrap(True)
+            self.ai_note.setObjectName("status")
+            self.plan = ai_plan(lay) if mode == "install" else None
+            self._cancel_ev = threading.Event()
+            self._progress = ""
+            self._shown_progress = ""
+            self._ai_running = False
             self.status = QLabel()
             self.status.setWordWrap(True)
             self.status.setObjectName("status")
@@ -376,6 +550,8 @@ def _make_window_class():  # type: ignore[no-untyped-def]
             lay_v.setSpacing(4 * u)
             lay_v.addLayout(top)
             lay_v.addWidget(self.box)
+            lay_v.addWidget(self.ai_box)
+            lay_v.addWidget(self.ai_note)
             lay_v.addWidget(self.status)
             lay_v.addLayout(buttons)
             self.setStyleSheet(
@@ -392,20 +568,38 @@ def _make_window_class():  # type: ignore[no-untyped-def]
             self.cat.setPixmap(self.sprites.cat(pose, False, self.u).pixmap)
 
         def _screen(self, pose: Pose, html: str, ok: str | None, cancel: str | None, box: str | None = None,
-                    checked: bool = False, status: str = "") -> None:
+                    checked: bool = False, status: str = "",
+                    ai: tuple[str | None, bool, str] | None = None) -> None:
             self._pose(pose)
             self.text.setText(html)
             self.box.setVisible(box is not None)
             if box is not None:
                 self.box.setText(box)
                 self.box.setChecked(checked)
+            ai_text, ai_checked, ai_note = ai if ai is not None else (None, False, "")
+            self.ai_box.setVisible(ai_text is not None)
+            if ai_text is not None:
+                self.ai_box.setText(ai_text)
+                self.ai_box.setChecked(ai_checked)
+            self.ai_note.setText(ai_note)
+            self.ai_note.setVisible(bool(ai_note))
             self.status.setText(status)
             self.status.setVisible(bool(status))
             for b, label in ((self.ok, ok), (self.cancel, cancel)):
                 b.setVisible(label is not None)
                 b.setText(label or "")
                 b.setEnabled(True)
-            self.adjustSize()
+            self._fit()
+
+        def _fit(self) -> None:
+            """Exactly as tall as the content (wrapped labels make adjustSize guess too tall)."""
+            lay = self.layout()
+            lay.activate()
+            h = lay.totalHeightForWidth(self.width())
+            if h > 0:
+                self.setFixedHeight(h)
+            else:
+                self.adjustSize()
 
         def _welcome(self) -> None:
             self.step = "confirm"
@@ -416,7 +610,8 @@ def _make_window_class():  # type: ignore[no-untyped-def]
                              "Settings → Apps.", "UNINSTALL", "CANCEL",
                              "Also delete its memory and settings", False,
                              f"That is {self.lay.data_dir}: settings, chat permissions, your best ball game, "
-                             "logs and the backups of files it edited. Otherwise it remembers you next time.")
+                             "logs and the backups of files it edited. Otherwise it remembers you next time. "
+                             "Ollama and its models stay - they have their own entry in Settings → Apps.")
                 return
             if self.old is None:
                 head = f"<b>Install Pixel Cat {__version__}?</b>"
@@ -427,11 +622,18 @@ def _make_window_class():  # type: ignore[no-untyped-def]
                         f"<b>Update Pixel Cat {self.old} → {__version__}?</b>")
                 dl = self.lay.desktop_link
                 desktop = bool(dl and dl.exists())
+            plan = self.plan
+            if plan is not None and plan.needed:
+                ai = ("Set up the AI chat too", True, plan.describe())
+            elif plan is not None:
+                ai = (None, False, f"AI chat: Ollama and {plan.model} are already here ✓")
+            else:
+                ai = None
             self._screen(Pose(body="sit", eyes="sparkle", mouth="smile"),
                          f"{head}<br>Just for you - no admin rights needed. You'll find it in the Start menu."
                          f"{where}", "INSTALL" if self.old is None else "UPDATE", "CANCEL",
                          "Put a shortcut on my desktop", desktop,
-                         "Your cat keeps its memory and settings." if self.old else "")
+                         "Your cat keeps its memory and settings." if self.old else "", ai)
 
         def _working(self, text: str) -> None:
             self._screen(Pose(body="walk", eyes="open"), f"<b>{text}</b>", None, None)
@@ -441,7 +643,7 @@ def _make_window_class():  # type: ignore[no-untyped-def]
             self._screen(Pose(body="sit", eyes="wide", mouth="o", blush=False), f"<b>Mrrp, that didn't work.</b><br>{text}",
                          "TRY AGAIN", "CANCEL")
 
-        def _done(self, left: list[str] | None = None) -> None:
+        def _done(self, left: list[str] | None = None, note: str = "") -> None:
             self.step = "done"
             self.exit_code = 0
             if self.mode == "uninstall":
@@ -453,7 +655,7 @@ def _make_window_class():  # type: ignore[no-untyped-def]
             else:
                 self._screen(Pose(body="sit", eyes="happy", mouth="smile"),
                              "<b>All set!</b><br>Pixel Cat is in your Start menu. To remove it later: "
-                             "Settings → Apps → Pixel Cat → Uninstall.", "START PIXEL CAT", "CLOSE")
+                             "Settings → Apps → Pixel Cat → Uninstall.", "START PIXEL CAT", "CLOSE", status=note)
 
         # ------------------------------------------------------------ actions
         def _in_background(self, fn: Callable[[], Any], then: Callable[[dict], None]) -> None:
@@ -470,12 +672,27 @@ def _make_window_class():  # type: ignore[no-untyped-def]
             th.start()
 
             def poll() -> None:
+                self._show_progress()
                 if th.is_alive():
                     QTimer.singleShot(50, poll)
                 else:
                     then(box)
 
             QTimer.singleShot(50, poll)
+
+        def _set_progress(self, text: str) -> None:      # from the worker thread
+            self._progress = text
+
+        def _show_progress(self) -> None:
+            if self._progress and self._progress != self._shown_progress:
+                self._shown_progress = self._progress
+                self.text.setText(f"<b>{self._progress}</b>")
+            stoppable = self._ai_running and not self._cancel_ev.is_set()
+            if stoppable and self.cancel.isHidden():
+                self.cancel.setText("SKIP THE AI PART")
+                self.cancel.setVisible(True)
+                self.cancel.setEnabled(True)
+                self._fit()
 
         def _on_ok(self) -> None:
             if self.step == "done":
@@ -486,6 +703,7 @@ def _make_window_class():  # type: ignore[no-untyped-def]
                 return
             self._busy = True
             want_box = self.box.isChecked()
+            self._want_ai = (not self.ai_box.isHidden()) and self.ai_box.isChecked()
             self._working("Asking a running Pixel Cat to close…")
             self._in_background(lambda: system.close_running(10.0), lambda r: self._after_close(r, want_box))
 
@@ -500,17 +718,39 @@ def _make_window_class():  # type: ignore[no-untyped-def]
                 self._in_background(lambda: uninstall(self.lay, want_box), self._after_work)
             else:
                 self._working("Installing…")
-                self._in_background(lambda: install(self.lay, self.src, want_box), self._after_work)
+                self._in_background(lambda: self._install_work(want_box), self._after_work)
+
+        def _install_work(self, want_box: bool) -> str:
+            install(self.lay, self.src, want_box)
+            if not (self._want_ai and self.plan is not None and self.plan.needed):
+                return ""
+            self._ai_running = True
+            try:
+                return setup_ai(self.lay, self.plan, self._set_progress, self._cancel_ev)
+            except Exception as exc:  # noqa: BLE001 - the cat itself is installed
+                if self._cancel_ev.is_set():
+                    return "AI setup skipped - run Setup again whenever you want it."
+                log.exception("AI setup failed")
+                return f"The AI part didn't work: {exc}. You can run Setup again later."
+            finally:
+                self._ai_running = False
 
         def _after_work(self, r: dict) -> None:
             self._busy = False
             if "error" in r:
                 self._error(str(r["error"]))
                 return
-            self._done(r.get("result") if self.mode == "uninstall" else None)
+            if self.mode == "uninstall":
+                self._done(r.get("result"))
+            else:
+                self._done(None, str(r.get("result") or ""))
 
         def _on_cancel(self) -> None:
             if self._busy:
+                if self._ai_running and not self._cancel_ev.is_set():
+                    self._cancel_ev.set()            # stop the Ollama download; the cat stays installed
+                    self.cancel.setText("STOPPING…")
+                    self.cancel.setEnabled(False)
                 return
             self.close()
 
