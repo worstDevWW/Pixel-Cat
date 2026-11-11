@@ -1,0 +1,6 @@
+# Runtime
+PySide6-Essentials>=6.6,<7   # QtCore/QtGui/QtWidgets only (smaller exe than the full PySide6 meta-package)
+requests>=2.31,<3
+
+# Build (only needed to produce the .exe)
+pyinstaller>=6.3

@@ -1,0 +1,32 @@
+{
+  "ollama_url": "http://localhost:11434",
+  "model": "qwen3.5:35b-a3b",
+  "num_ctx": 65536,
+  "keep_alive": "10m",
+  "think": "auto",
+  "request_timeout_s": 120,
+  "connect_timeout_s": 4,
+  "max_history": 30,
+  "temperature": 0.6,
+  "enable_tools": true,
+  "hide_during_presentations": true,
+  "pixel_scale_override": 0,
+  "apps": {
+    "notepad": ["notepad.exe"],
+    "calculator": ["calc.exe"],
+    "paint": ["mspaint.exe"],
+    "explorer": ["explorer.exe"],
+    "terminal": ["wt.exe"],
+    "snipping tool": ["snippingtool.exe"],
+    "settings": ["ms-settings:"],
+    "browser": ["https://www.bing.com"],
+    "character map": ["charmap.exe"],
+    "wordpad": ["write.exe"]
+  },
+  "allowed_roots": ["desktop", "documents", "downloads", "pictures", "music", "videos", "pixelcat_notes"],
+  "tuning": {
+    "base_pixel_scale": 3.0,
+    "walk_speed": 14.0,
+    "min_travel_gap_s": 50.0
+  }
+}
