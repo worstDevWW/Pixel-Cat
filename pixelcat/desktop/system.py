@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -12,7 +13,10 @@ log = logging.getLogger(__name__)
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "PixelCat"
-MUTEX_NAME = "Local\\PixelCat_SingleInstance_Mutex"
+# PIXELCAT_INSTANCE gives test runs their own names, so they never touch the user's cat
+INSTANCE = os.environ.get("PIXELCAT_INSTANCE", "")
+MUTEX_NAME = "Local\\PixelCat_SingleInstance_Mutex" + INSTANCE
+QUIT_EVENT_NAME = "Local\\PixelCat_QuitRequest" + INSTANCE   # Setup asks a running cat to close
 
 _mutex_handle = None  # kept alive for the process lifetime
 
@@ -30,6 +34,81 @@ def acquire_single_instance() -> bool:
         log.warning("CreateMutexW failed (%s) - continuing without guard", err)
         return True
     return err != win32.ERROR_ALREADY_EXISTS
+
+
+# --- "please quit" for updates and uninstalling -------------------------------
+def _k32():  # type: ignore[no-untyped-def]
+    import ctypes
+    from ctypes import wintypes
+
+    k = ctypes.WinDLL("kernel32", use_last_error=True)   # own instance: own argtypes
+    k.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+    k.CreateEventW.restype = wintypes.HANDLE
+    k.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    k.OpenEventW.restype = wintypes.HANDLE
+    k.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    k.OpenMutexW.restype = wintypes.HANDLE
+    k.SetEvent.argtypes = [wintypes.HANDLE]
+    k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k.WaitForSingleObject.restype = wintypes.DWORD
+    k.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k
+
+
+def create_quit_event() -> int:
+    """The running cat listens on this event; Setup sets it to ask the cat to close."""
+    if not win32.IS_WINDOWS:
+        return 0
+    try:
+        return int(_k32().CreateEventW(None, True, False, QUIT_EVENT_NAME) or 0)
+    except OSError:
+        return 0
+
+
+def quit_requested(handle: int) -> bool:
+    if not handle:
+        return False
+    try:
+        return _k32().WaitForSingleObject(handle, 0) == 0
+    except OSError:
+        return False
+
+
+def is_running() -> bool:
+    """Is a Pixel Cat (of this instance name) running right now?"""
+    if not win32.IS_WINDOWS:
+        return False
+    k = _k32()
+    h = k.OpenMutexW(0x00100000, False, MUTEX_NAME)   # SYNCHRONIZE
+    if not h:
+        return False
+    k.CloseHandle(h)
+    return True
+
+
+def close_running(timeout: float = 10.0) -> str:
+    """Ask a running Pixel Cat to quit (it saves first) and wait until it is gone.
+    Returns "not running", "closed" or "still running" (e.g. an old version that
+    doesn't know the request - the user has to quit it from its menu)."""
+    if not win32.IS_WINDOWS:
+        return "not running"
+    k = _k32()
+    mutex = k.OpenMutexW(0x00100000, False, MUTEX_NAME)
+    if not mutex:
+        return "not running"
+    try:
+        ev = k.OpenEventW(0x0002, False, QUIT_EVENT_NAME)   # EVENT_MODIFY_STATE
+        if ev:
+            k.SetEvent(ev)
+            k.CloseHandle(ev)   # never keep it open: a new cat would inherit the request
+        r = k.WaitForSingleObject(mutex, int(timeout * 1000))
+        if r in (0, 0x80):      # released, or abandoned when the cat's process ended
+            k.ReleaseMutex(mutex)
+            return "closed"
+        return "still running"
+    finally:
+        k.CloseHandle(mutex)
 
 
 # --- autostart ------------------------------------------------------------

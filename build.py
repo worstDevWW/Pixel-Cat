@@ -1,7 +1,9 @@
 """Build a single windowed PixelCat.exe with PyInstaller.
 
 Usage:  python build.py
-Output: dist/PixelCat.exe   (copy config.json next to it to customise)
+Output: dist/PixelCat.exe        the app (portable: just run it; config.json next to it customises it)
+        dist/PixelCat-Setup.exe  the same exe under a Setup name: it installs Pixel Cat for the
+                                 current user (Start menu, Settings -> Apps, no admin rights)
 
 The icon is rendered from the procedural sprite at build time, so the project
 still contains no binary asset files.
@@ -87,6 +89,12 @@ def main() -> int:
         shutil.copy2(ROOT / "config.json", dist / "config.json")
         refresh_shell_icon(target)
         print("built:", target)
+        setup = dist / "PixelCat-Setup.exe"     # same program; the name makes it the installer
+        tmp = dist / "PixelCat-Setup.tmp"
+        shutil.copyfile(target, tmp)
+        os.replace(tmp, setup)
+        refresh_shell_icon(setup)
+        print("built:", setup)
     return rc
 
 

@@ -184,6 +184,39 @@ def lnk_target(path: str | Path) -> tuple[str, bool]:
             ole32.CoUninitialize()
 
 
+def make_lnk(path: str | Path, target: str | Path, args: str = "", workdir: str | Path = "",
+             icon: str | Path = "", description: str = "") -> bool:
+    """Create (or replace) a .lnk shortcut to ``target``."""
+    hr_init = ole32.CoInitializeEx(None, 0x2)
+    link = ctypes.c_void_p()
+    pf = ctypes.c_void_p()
+    try:
+        if ole32.CoCreateInstance(ctypes.byref(_CLSID_ShellLink), None, 1, ctypes.byref(_IID_IShellLinkW),
+                                  ctypes.byref(link)) < 0 or not link.value:
+            return False
+        L = link.value
+        _method(L, 20, wintypes.LPCWSTR)(L, str(target))                 # SetPath
+        if args:
+            _method(L, 11, wintypes.LPCWSTR)(L, args)                    # SetArguments
+        if workdir:
+            _method(L, 9, wintypes.LPCWSTR)(L, str(workdir))             # SetWorkingDirectory
+        if description:
+            _method(L, 7, wintypes.LPCWSTR)(L, description[:250])        # SetDescription
+        if icon:
+            _method(L, 17, wintypes.LPCWSTR, ctypes.c_int)(L, str(icon), 0)  # SetIconLocation
+        qi = _method(L, 0, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+        if qi(L, ctypes.byref(_IID_IPersistFile), ctypes.byref(pf)) < 0 or not pf.value:
+            return False
+        return _method(pf.value, 6, wintypes.LPCWSTR, wintypes.BOOL)(pf.value, str(path), True) >= 0   # Save
+    except OSError:
+        return False
+    finally:
+        _release(pf.value or 0)
+        _release(link.value or 0)
+        if hr_init in (0, 1):
+            ole32.CoUninitialize()
+
+
 def needs_admin(target: object) -> bool:
     """For an open_app target: command list, .lnk/.exe path, URI or Store app."""
     try:

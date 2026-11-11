@@ -177,6 +177,8 @@ class PixelCatApp(QObject):
         self.save_timer = self._timer(int(self.t.autosave_s * 1000), self.save)
         self.top_timer = self._timer(5000, self._keep_on_top)
         self.tray_timer = self._timer(2000, self._sync_tray)
+        self._quit_event = 0
+        self.quit_timer = self._timer(1000, self._check_quit_request)   # Setup asks us to close (update)
         for sig in (QGuiApplication.instance().screenAdded, QGuiApplication.instance().screenRemoved,
                     QGuiApplication.instance().primaryScreenChanged):
             sig.connect(lambda *_: QTimer.singleShot(600, self._refresh_monitors))
@@ -214,6 +216,9 @@ class PixelCatApp(QObject):
         for tm in (self.tick_timer, self.win_timer, self.mon_timer, self.fs_timer, self.save_timer,
                    self.top_timer, self.tray_timer):
             tm.start()
+        if not self.selftest or system.INSTANCE:
+            self._quit_event = system.create_quit_event()
+            self.quit_timer.start()
         if not self.saved.autostart_asked and not self.selftest:
             QTimer.singleShot(2500, self._ask_autostart)
         if self.saved.watches and not self.selftest:
@@ -379,6 +384,12 @@ class PixelCatApp(QObject):
                 self.chat.show()
             self._last_tick = time.monotonic()
             self._refresh_windows()
+
+    def _check_quit_request(self) -> None:
+        if system.quit_requested(self._quit_event):
+            log.info("Setup asked me to close (update or uninstall)")
+            self.quit_timer.stop()
+            self.quit()
 
     def _keep_on_top(self) -> None:
         if not self.hidden_fullscreen and self.overlay.hwnd():

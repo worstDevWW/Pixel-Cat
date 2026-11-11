@@ -4,6 +4,8 @@ Run:  pythonw main.py            (no console)
       python main.py --debug     (console + debug logging)
       python main.py --selftest 20   (run 20 s, save an overlay snapshot, quit)
       python main.py --export-sheets (write the PNG sprite sheet and exit)
+      PixelCat-Setup.exe             (the built exe under a "Setup" name: installer)
+      PixelCat.exe --uninstall       (what Settings -> Apps -> Uninstall runs)
 """
 from __future__ import annotations
 
@@ -24,6 +26,13 @@ def main() -> int:
     parser.add_argument("--selftest", type=float, default=0.0, metavar="SECONDS",
                         help="run for N seconds, write a snapshot to the cache folder, then quit")
     parser.add_argument("--export-sheets", action="store_true", help="export the sprite sheet as PNG and exit")
+    parser.add_argument("--install", action="store_true", help="install for this user (no admin rights)")
+    parser.add_argument("--uninstall", action="store_true", help="uninstall Pixel Cat")
+    parser.add_argument("--quiet", action="store_true", help="with --install/--uninstall: no window")
+    parser.add_argument("--no-desktop-shortcut", action="store_true", help="with --install --quiet")
+    parser.add_argument("--launch", action="store_true", help="with --install --quiet: start the cat afterwards")
+    parser.add_argument("--delete-data", action="store_true",
+                        help="with --uninstall --quiet: also delete the cat's settings and memory")
     args = parser.parse_args()
 
     from pixelcat import paths
@@ -33,6 +42,17 @@ def main() -> int:
     setup_logging(args.debug)
     log = logging.getLogger("pixelcat")
     win32.set_dpi_awareness()  # before any window exists
+
+    from pixelcat import installer
+
+    if args.install or args.uninstall or installer.is_setup_name(sys.executable):
+        if not getattr(sys, "frozen", False):
+            print("The installer works with the built exe: run  python build.py  and then dist\\PixelCat-Setup.exe")
+            return 1
+        log.info("%s (%s)", "uninstalling" if args.uninstall else "setup", sys.executable)
+        if args.quiet:
+            return installer.run_quiet(args)
+        return installer.run_window("uninstall" if args.uninstall else "install")
 
     if not args.export_sheets and not system.acquire_single_instance():
         log.info("another instance is running - exiting")
