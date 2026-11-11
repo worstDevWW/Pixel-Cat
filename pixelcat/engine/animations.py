@@ -142,6 +142,21 @@ def _build() -> dict[str, Anim]:
     loop("hug", [(LOAF.with_(eyes="content", mouth="w", paw=1), 0.45), (LOAF.with_(eyes="content", mouth="w"), 0.15),
                  (LOAF.with_(eyes="content", mouth="w", paw=2), 0.45), (LOAF.with_(eyes="content", mouth="w"), 0.15)])
     loop("offer", _swish(SIT.with_(eyes="sparkle", mouth="smile"), 0.1, 1.0))
+
+    # --- minigames -------------------------------------------------------------
+    loop("chatter", [(SIT.with_(eyes="wide", mouth="o", tail=t), 0.08) for t in (0.4, -0.4)]
+         + [(SIT.with_(eyes="wide", mouth="w", tail=t), 0.08) for t in (0.4, -0.4)])        # "ekekek" at prey
+    loop("stare", _swish(SIT.with_(eyes="half", mouth="w"), 0.35, 0.6))                    # innocent... not
+    loop("beg_open", [(SIT.with_(eyes="sparkle", mouth="o"), 0.4), (SIT.with_(eyes="sparkle", mouth="o",
+                                                                               head_dy=1), 0.4)])
+    loop("chew", [(SIT.with_(eyes="happy", mouth="w"), 0.12), (SIT.with_(eyes="happy", mouth="o"), 0.12)])
+    loop("fish_wait", _swish(SIT.with_(look=(1, 1)), 0.45, 0.6))
+    loop("fish_tug", _phases(Pose(body="crouch", eyes="wide", mouth="o"), 4, 0.07))
+    loop("peek", _swish(SIT.with_(eyes="sparkle"), 0.16, 1.0))                             # tail tip wiggles
+    loop("tired", [(LIE.with_(eyes="half", mouth="o"), 0.4), (LIE.with_(eyes="half", mouth="w"), 0.4)])
+    loop("box_sit", _swish(LOAF.with_(eyes="sparkle", mouth="w"), 0.5, 0.3))
+    loop("box_nap", [(CURL.with_(phase=0), 1.3), (CURL.with_(phase=1), 1.3)])
+    loop("annoyed", _swish(SIT.with_(eyes="half", mouth="flat", blush=False), 0.3, 0.8))
     return A
 
 

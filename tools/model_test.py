@@ -157,7 +157,7 @@ def part_status() -> None:
     chat = ChatWindow(SpriteLibrary("charcoal"))
     st.changed.connect(lambda: chat.set_model_banner(st.banner()), Qt.ConnectionType.QueuedConnection)
     st.ensure()
-    pump(5, lambda: st.state == "loading" and not chat.model_bar.isHidden())
+    pump(15, lambda: st.state == "loading" and not chat.model_bar.isHidden())   # (a cold first run is slow)
     shown = chat.model_bar.text() if not chat.model_bar.isHidden() else ""
     check("while the model loads, the chat says 'Model is starting up, please wait…'",
           st.state == "loading" and shown == "⏳ Model is starting up, please wait…", shown)
@@ -182,7 +182,8 @@ def part_status() -> None:
     # missing, OK given -> download with progress -> load -> ready
     st, seen = status_for(fake, may=True)
     pct: list[str] = []
-    st.changed.connect(lambda: pct.append(st.banner() or "") if st.state == "downloading" else None)
+    st.changed.connect(lambda: pct.append(st.banner() or "") if st.state == "downloading" else None,
+                       Qt.ConnectionType.DirectConnection)   # read at emit time, not when the GUI gets to it
     st.ensure()
     pump(20, lambda: st.state == "ready")
     pcts = [int(b.split(": ")[1].split("%")[0]) for b in pct if "%" in b]

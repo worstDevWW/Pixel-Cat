@@ -35,6 +35,8 @@ for name, (x, y, w, h) in {"A": (1350, 760, 760, 420), "B": (500, 420, 560, 380)
     lbl.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
     lbl.setGeometry(x, y, w, h)
     lbl.show()
+    import ctypes   # to the top of the z-order, without activating (the focus stays where it is)
+    ctypes.windll.user32.SetWindowPos(int(lbl.winId()), 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
     wins[name] = lbl
 print("ready", flush=True)
 import queue, threading
@@ -55,6 +57,7 @@ app.exec()
 '''
 
 results: list[tuple[str, bool, str]] = []
+HELPERS: list = []
 
 
 def check(name: str, ok: bool, info: str = "") -> None:
@@ -65,6 +68,7 @@ def check(name: str, ok: bool, info: str = "") -> None:
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     helper = subprocess.Popen([sys.executable, "-c", HELPER], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    HELPERS.append(helper)                     # closed even if the test crashes
     assert helper.stdout is not None and helper.stdin is not None
     print("helper:", helper.stdout.readline().strip(), flush=True)
 
@@ -115,8 +119,8 @@ def main() -> int:
     test_tops = [t for t in b.smap.tops if b.win_rects.get(t.hwnd) and t.hwnd in pet._known_hwnds]
     by_hwnd = {}
     for w in __import__("pixelcat.desktop.windows", fromlist=["x"]).enumerate_windows(pet.own_pid):
-        if w.title.startswith("PixelCat test window"):
-            by_hwnd[w.title[-1]] = w.hwnd
+        if w.title.startswith("PixelCat test window") and w.title[-1] not in by_hwnd:
+            by_hwnd[w.title[-1]] = w.hwnd       # (the topmost one, should an old one be left over)
     check("test windows detected as surfaces", all(any(t.hwnd == h for t in test_tops) for h in by_hwnd.values()),
           f"{len(b.smap.tops)} tops, {len(b.smap.walls)} walls")
 
@@ -176,5 +180,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    rc = main()
+    rc = 1
+    try:
+        rc = main()
+    finally:
+        for h in HELPERS:
+            if h.poll() is None:
+                h.kill()
     os._exit(rc)

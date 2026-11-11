@@ -556,9 +556,10 @@ def _make_window_class():  # type: ignore[no-untyped-def]
             lay_v.addLayout(buttons)
             self.setStyleSheet(
                 theme.chat_stylesheet(max(1, u // 2 + u % 2), font_px)
-                + f"QLabel {{ color:#3a2129; font-family:'Segoe UI'; font-size:{font_px}px; }}"
-                + f"QLabel#status {{ color:#8c6e78; font-size:{small_px}px; }}"
-                + f"QCheckBox {{ color:#3a2129; font-family:'Segoe UI'; font-size:{font_px}px; spacing:{2 * u}px; }}")
+                + f"QLabel {{ color:{theme.current().text}; font-family:'Segoe UI'; font-size:{font_px}px; }}"
+                + f"QLabel#status {{ color:{theme.current().muted}; font-size:{small_px}px; }}"
+                + f"QCheckBox {{ color:{theme.current().text}; font-family:'Segoe UI'; font-size:{font_px}px; "
+                  f"spacing:{2 * u}px; }}")
             self.setFixedWidth(205 * u)
             self.old = installed_version(lay)
             self._welcome()
@@ -603,7 +604,7 @@ def _make_window_class():  # type: ignore[no-untyped-def]
 
         def _welcome(self) -> None:
             self.step = "confirm"
-            where = f"<br><span style='color:#8c6e78'>{self.lay.install_dir}</span>"
+            where = f"<br><span style='color:{theme.current().muted}'>{self.lay.install_dir}</span>"
             if self.mode == "uninstall":
                 self._screen(Pose(body="sit", eyes="half", ears="back", mouth="flat", blush=False),
                              "<b>Uninstall Pixel Cat?</b><br>The cat leaves your desktop, the Start menu and "
@@ -771,12 +772,8 @@ def _make_window_class():  # type: ignore[no-untyped-def]
             p = QPainter(self)
             u = self.u
             theme.draw_pixel_panel(p, self.rect(), u)
-            bar_h = 13 * u
-            p.fillRect(2 * u, u, self.width() - 5 * u, bar_h - u, theme.ACCENT)
-            p.fillRect(2 * u, bar_h, self.width() - 5 * u, u, theme.INK)
-            p.drawPixmap(4 * u, 2 * u, self.sprites.face_icon(9 * u))
             title = "UNINSTALL" if self.mode == "uninstall" else "PIXEL CAT SETUP"
-            p.drawPixmap(15 * u, 4 * u, render_text(title, u, theme.INK, QColor(255, 255, 255, 120)))
+            theme.draw_title_bar(p, self.width(), u, title, self.sprites.face_icon(9 * u))
             p.drawPixmap(self._close_rect().topLeft(), self.sprites.icon("close", u))
             p.end()
 

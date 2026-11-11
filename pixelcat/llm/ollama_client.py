@@ -28,9 +28,10 @@ class ChatWorker(QThread):
     failed = Signal(str, str)
 
     def __init__(self, cfg: Config, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None,
-                 think: bool | None = None) -> None:
+                 think: bool | None = None, model: str | None = None) -> None:
         super().__init__()
         self.cfg = cfg
+        self.model = model or cfg.model   # the chat may use another model than the default
         self.messages = messages
         self.tools = tools
         self.think = think            # decided per request by the app ("auto" mode)
@@ -58,7 +59,7 @@ class ChatWorker(QThread):
         """One request; returns True if it should be retried (without the think flag)."""
         url = self.cfg.ollama_url.rstrip("/") + "/api/chat"
         payload: dict[str, Any] = {
-            "model": self.cfg.model,
+            "model": self.model,
             "messages": self.messages,
             "stream": True,
             "keep_alive": self.cfg.keep_alive,

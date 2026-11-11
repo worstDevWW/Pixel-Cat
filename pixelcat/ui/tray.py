@@ -34,6 +34,9 @@ class Tray(QSystemTrayIcon):
         self.menu.addAction(act)
         return act
 
+    def restyle(self) -> None:
+        self.menu.setStyleSheet(theme.tray_menu_stylesheet())
+
     def refresh_icon(self) -> None:
         icon = QIcon()
         for size in (16, 20, 24, 32, 48):

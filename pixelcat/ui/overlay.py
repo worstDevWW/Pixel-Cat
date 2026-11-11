@@ -48,6 +48,7 @@ class CatOverlay(QWidget):
         self.setMouseTracking(True)
         self.scale = 3
         self.frame: CatFrame | None = None
+        self.raise_on_move = True        # False during minigames: their windows stay above the cat
         self.mirrored = False
         self._geom: tuple[int, int, int, int] | None = None
         self._hwnd = 0
@@ -84,6 +85,17 @@ class CatOverlay(QWidget):
     def hwnd(self) -> int:
         return self._hwnd
 
+    @property
+    def hat(self) -> str:
+        """Cosmetics -> Hats: drawn into the cat's own frames (sits on the head in every pose)."""
+        return self.sprites.worn
+
+    @hat.setter
+    def hat(self, name: str) -> None:
+        self.sprites.set_worn(name)
+        self.frame = None              # the next sync picks the frame with the hat
+        self.update()
+
     # ------------------------------------------------------------- geometry
     def canvas_origin(self) -> tuple[int, int]:
         """Physical top-left of the overlay for the brain's anchor position."""
@@ -100,7 +112,7 @@ class CatOverlay(QWidget):
         geom = (x, y, self.t.canvas_w * scale, self.t.canvas_h * scale)
         if geom != self._geom and self._hwnd:
             try:
-                win32.move_window(self._hwnd, *geom, topmost=True)
+                win32.move_window(self._hwnd, *geom, topmost=self.raise_on_move)
             except Exception:  # noqa: BLE001
                 log.exception("move_window failed")
             self._geom = geom
@@ -143,10 +155,11 @@ class CatOverlay(QWidget):
             if b.fish_t > 0 or b.bones_t > 0:
                 name = "fish_bones" if b.fish_t <= 0 else ("fish" if b.fish_t > 2.5 else "fish_half")
                 self._draw_fx(p, name, ax + 15 * b.facing, ay, bottom=True, mirror=b.facing < 0)
-            if self.frame is not None:
-                p.drawPixmap((ax - 16) * s, (ay - 32) * s, self.frame.pixmap)
+            if self.frame is not None:          # (with a hat the frame is bigger than 32x32)
+                fr = self.frame
+                p.drawPixmap((ax - 16 - fr.ox) * s, (ay - 32 - fr.oy) * s, fr.pixmap)
             game = b.game
-            if game is not None and game.crown() and not anim.startswith("flip"):
+            if not self.hat and game is not None and game.crown() and not anim.startswith("flip"):
                 hx, hy = b.head_rel()      # the champion's crown (ball game, round 7 and up)
                 self._draw_fx(p, "crown", ax + hx + b.facing, ay + hy - 6, bottom=True)
             for part in b.particles:
@@ -190,9 +203,7 @@ class CatOverlay(QWidget):
         s = self.scale
         fx = (px - (int(round(self.brain.x)) - 16 * s)) // s
         fy = (py - (int(round(self.brain.y)) - 32 * s)) // s
-        if not (0 <= fx < 32 and 0 <= fy < 32):
-            return False
-        return self.frame.hit(int(fx), int(fy), tolerance)
+        return self.frame.hit(int(fx), int(fy), tolerance)   # (the hat counts: it sticks out of the box)
 
     def _poll_cursor(self) -> None:
         """Toggle click-through and detect hover-stroke petting (runs ~25 Hz)."""

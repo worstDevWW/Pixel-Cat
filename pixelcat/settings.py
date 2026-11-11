@@ -177,6 +177,17 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def save_user_setting(key: str, value: Any) -> None:
+    """Remember one setting in %APPDATA%/PixelCat/config.json (the user's own overrides,
+    which win over the bundled config.json)."""
+    path = paths.data_dir() / "config.json"
+    data = _read_json(path) or {}
+    data[key] = value
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def load_config() -> Config:
     """Load defaults <- bundled config.json <- %APPDATA% config.json."""
     cfg = Config()

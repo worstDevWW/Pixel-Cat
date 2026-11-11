@@ -44,6 +44,7 @@ def main() -> int:  # noqa: C901 - a linear test script
     from pixelcat.settings import load_config
 
     saved = SavedState(autostart_asked=True)
+    saved.tutorials_seen = ["ball"]             # (the first-time explanation is tested in menu/games_ui_test)
     pet = PixelCatApp(app, load_config(), saved, selftest=0)
     pet.save = lambda: None                     # never touch the real state.json
     pet.start()
@@ -147,9 +148,9 @@ def main() -> int:  # noqa: C901 - a linear test script
         pump(0.5)
         check("...and it comes back afterwards", bw.isVisible())
         pet._open_menu()
-        label = next((it.label for it in pet.menu.items if it.key == "play"), "")
+        label = next((c.label for it in pet.menu.items for c in [it, *it.children] if c.key == "stopgame"), "")
         pet.menu.close()
-        check("the menu says 'Stop playing' during a game", label == "Stop playing", label)
+        check("the menu says 'Stop playing ball' during a game", label == "Stop playing ball", label)
         pet._on_menu("play")
     check("stopping ends the game; the cat goes back to normal", not game.active and brain.state != S.BALL
           and not brain.floor_only)

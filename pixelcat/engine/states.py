@@ -28,6 +28,7 @@ class S(Enum):
     HELD = "held"
     PAUSED = "paused"
     BALL = "playing ball"
+    GAME = "playing"
 
 
 @dataclass(frozen=True)
@@ -77,4 +78,5 @@ STATES: dict[S, StateDef] = {
     S.HELD: StateDef("dangle", (), (1e9, 1e9), look=False),
     S.PAUSED: StateDef("paused", (), (1e9, 1e9), calm=True, look=False),
     S.BALL: StateDef("ball_watch", (), (1e9, 1e9)),     # the ball game drives the cat
+    S.GAME: StateDef("sit_watch", (), (1e9, 1e9)),      # a minigame drives the cat
 }

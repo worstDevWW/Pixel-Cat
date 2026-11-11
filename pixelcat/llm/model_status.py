@@ -92,6 +92,7 @@ class ModelStatus(QObject):
         self.may_download = may_download
         self.find_ollama = ollama_finder
         self.start_ollama = starter
+        self.override: str | None = None   # this chat uses another model than the default
         self.state = "unknown"         # checking starting_ollama downloading loading ready
         self.error = ""                # + no_ollama offline missing error
         self.done_bytes = 0
@@ -101,6 +102,10 @@ class ModelStatus(QObject):
         self._stop = threading.Event()
 
     # ------------------------------------------------------------ public
+    @property
+    def model(self) -> str:
+        return self.override or self.cfg.model
+
     def busy(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
@@ -122,7 +127,7 @@ class ModelStatus(QObject):
 
     def banner(self) -> str | None:
         """What the chat shows while the model isn't ready (None: nothing to show)."""
-        m, st = self.cfg.model, self.state
+        m, st = self.model, self.state
         if st in WORKING:
             return "⏳ Model is starting up, please wait…"
         if st == "downloading":
@@ -152,7 +157,7 @@ class ModelStatus(QObject):
     # ------------------------------------------------------------ the work
     def _set(self, state: str, error: str = "") -> None:
         if state != self.state or error != self.error:
-            log.info("model %s: %s%s", self.cfg.model, state, f" ({error})" if error else "")
+            log.info("model %s: %s%s", self.model, state, f" ({error})" if error else "")
         self.state, self.error = state, error
         self.checked_at = time.monotonic()
         self.changed.emit()
@@ -193,7 +198,8 @@ class ModelStatus(QObject):
                     return
                 time.sleep(1.0)
         tags = self._get("/api/tags") or {}
-        if not any(same_model(m.get("name", ""), cfg.model) for m in tags.get("models", [])):
+        model = self.model
+        if not any(same_model(m.get("name", ""), model) for m in tags.get("models", [])):
             if not self.may_download():
                 self._set("missing")
                 return
@@ -201,13 +207,13 @@ class ModelStatus(QObject):
             if self.state != "downloading":
                 return
         ps = self._get("/api/ps") or {}
-        if any(same_model(m.get("name", ""), cfg.model) for m in ps.get("models", [])):
+        if any(same_model(m.get("name", ""), model) for m in ps.get("models", [])):
             self._set("ready")
             return
         self._set("loading")
         t0 = time.monotonic()
         r = requests.post(self._base() + "/api/generate",
-                          json={"model": cfg.model, "prompt": "", "keep_alive": cfg.keep_alive,
+                          json={"model": model, "prompt": "", "keep_alive": cfg.keep_alive,
                                 "options": {"num_ctx": cfg.num_ctx}},
                           timeout=(cfg.connect_timeout_s, 900))
         if not r.ok:
@@ -223,7 +229,7 @@ class ModelStatus(QObject):
         totals: dict[str, int] = {}
         done: dict[str, int] = {}
         last = 0.0
-        with requests.post(self._base() + "/api/pull", json={"model": self.cfg.model, "stream": True},
+        with requests.post(self._base() + "/api/pull", json={"model": self.model, "stream": True},
                            stream=True, timeout=(self.cfg.connect_timeout_s, 300)) as r:
             if not r.ok:
                 self._set("error", f"download failed: {r.text[:200]}")
@@ -246,7 +252,7 @@ class ModelStatus(QObject):
                         last = time.monotonic()
                         self.changed.emit()
                 if d.get("status") == "success":
-                    log.info("model %s downloaded", self.cfg.model)
+                    log.info("model %s downloaded", self.model)
                     self.done_bytes = self.total_bytes
                     self.changed.emit()
                     return

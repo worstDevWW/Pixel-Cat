@@ -172,7 +172,7 @@ def main() -> int:
         overlap = not (g.right() < cl or g.left() > cr or g.bottom() < ct or g.top() > cb)
         check("menu fully inside work area", inside, f"{g.getRect()} work={mon.work}")
         check("menu does not cover the cat", not overlap, f"cat={ov.cat_rect()}")
-        m.expanded.add("skin")
+        m.expanded.update({"games", "settings"})
         m._reposition()
         m.grab().save(str(OUT / "menu.png"))
         g2 = m.geometry()

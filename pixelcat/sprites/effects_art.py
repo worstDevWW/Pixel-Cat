@@ -130,6 +130,22 @@ ICONS: dict[str, list[str]] = {
     "close": ["w     w", " w   w ", "  w w  ", "   w   ", "  w w  ", " w   w ", "w     w"],
     "send": ["w      ", "ww     ", "wwww   ", "wwwwww ", "wwww   ", "ww     ", "w      "],
     "dot": ["       ", "       ", "  www  ", "  www  ", "  www  ", "       ", "       "],
+    "radio_off": ["  ggg  ", " ggggg ", "ggwwwgg", "ggwwwgg", "ggwwwgg", " ggggg ", "  ggg  "],
+    "radio_on": ["  eee  ", " eeeee ", "eeeweee", "eewwwee", "eeeweee", " eeeee ", "  eee  "],
+    "gear": ["   g   ", " ggggg ", " gg gg ", "gg   gg", " gg gg ", " ggggg ", "   g   "],
+    "gamepad": ["       ", " ppppp ", "ppwpppp", "pwwwprp", "ppwpppp", " pp pp ", "       "],
+    # minigames, Cat Pass and cosmetics
+    "laser": ["       ", "  aaa  ", " aaaaa ", " aawaa ", " aaaaa ", "  aaa  ", "       "],
+    "treat": ["       ", "  ccc  ", " chccc ", " cccCc ", " ccccC ", "  CCC  ", "       "],
+    "mug": ["       ", "wwwww  ", "wBBBwww", "wwwwwkw", "wBBBwww", "wwwww  ", " www   "],
+    "mouse": ["       ", "  gg   ", " gggg  ", "gkggggg", "pgggggg", " g  g p", "      p"],
+    "rod": ["     GG", "    G w", "   G  w", "  G   w", " G    w", "G    rr", "     rr"],
+    "eye": ["       ", "  www  ", " wwkww ", "wwkkkww", " wwkww ", "  www  ", "       "],
+    "box": ["hh   hh", " hh hh ", "ccccccc", "cCCcCCc", "ccccccc", "ccccccc", "CCCCCCC"],
+    "lock": ["  ggg  ", " g   g ", " g   g ", "yyyyyyy", "yyykyyy", "yyykyyy", "yyyyyyy"],
+    "star": ["   y   ", "  yyy  ", "yyylyyy", " yyyyy ", " yy yy ", "yy   yy", "       "],
+    "hat": ["       ", " BBBBB ", " BBBBB ", " BBBBB ", " rrrrr ", "BBBBBBB", "       "],
+    "skin": ["o     o", "oo   oo", "ooooooo", "okoooko", "ooopooo", " ooooo ", "       "],
 }
 
 

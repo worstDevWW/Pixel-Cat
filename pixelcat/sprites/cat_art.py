@@ -152,6 +152,10 @@ def _mouth(cv: Canvas, fc: int, n: int, kind: str) -> None:
             cv.set(x, n + 2, OUT)
 
 
+# The hat being worn while a frame is rendered, and where head() put the head.
+_WEAR: dict[str, object] = {"hat": None, "head": None}
+
+
 def head(cv: Canvas, c: int, hy: float, p: Pose, face_dx: int = 1, whiskers: bool = True) -> None:
     """Wide rounded-square head centred on column ``c`` (pixel centre c+0.5),
     vertical centre ``hy``.  The face shifts ``face_dx`` toward the facing side."""
@@ -160,7 +164,10 @@ def head(cv: Canvas, c: int, hy: float, p: Pose, face_dx: int = 1, whiskers: boo
     cx = c + 0.5
     cv.round_rect(c - 8, ht - 1, 17, 14, 4.4, OUT)
     cv.round_rect(c - 7, ht, 15, 12, 3.6, BASE)
-    _ears(cv, cx, ht, p.ears)
+    hat = _WEAR["hat"]
+    if hat is None or getattr(hat, "ears", "show") != "hide":   # big hats cover the ears
+        _ears(cv, cx, ht, p.ears)
+    _WEAR["head"] = (c, ht)
     fc = c + face_dx
     ey = ht + 5
     _eyes(cv, fc, ey, p)
@@ -475,18 +482,67 @@ def render_icon() -> Canvas:
 
 def render(p: Pose) -> Canvas:
     """Render one pose to a 32x32 palette-indexed canvas (facing right)."""
-    cv = Canvas(SIZE, SIZE)
-    BODIES.get(p.body, _stand)(cv, p)
-    cv.outline(OUT)
-    sheen(cv)
-    cv.apply_post()
-    cv.rim(RIM, OUT)
-    if p.rot % 4:
-        # centre the whole cat on the canvas first, so nothing is cut off when it turns
-        box = cv.bbox()
-        if box is not None:
-            x0, y0, x1, y1 = box
-            cv = cv.shifted(int(round(15.5 - (x0 + x1) / 2)), int(round(15.5 - (y0 + y1) / 2)))
-        for _ in range(p.rot % 4):
-            cv = cv.rotated_ccw()
-    return cv
+    return render_worn(p, None)[0]
+
+
+def render_worn(p: Pose, hat_name: str | None = None) -> tuple[Canvas, int, int]:
+    """Render one pose wearing a hat (or none).  A hat can stick out of the 32x32 box, so the
+    canvas may be bigger: returns (canvas, ox, oy) - where the 32x32 box starts inside it."""
+    from . import hats
+
+    hat = hats.get(hat_name) if hat_name else None
+    _WEAR["hat"], _WEAR["head"] = hat, None
+    try:
+        cv = Canvas(SIZE, SIZE)
+        BODIES.get(p.body, _stand)(cv, p)
+        cv.outline(OUT)
+        sheen(cv)
+        cv.apply_post()
+        ox = oy = 0
+        if hat is not None and _WEAR["head"] is not None:
+            c, ht = _WEAR["head"]  # type: ignore[misc]
+            cv, ox, oy = _put_on(cv, hat, c, ht)
+        cv.rim(RIM, OUT)
+        if p.rot % 4:
+            if (cv.w, cv.h) != (SIZE, SIZE):
+                # a square canvas with the 32x32 box in the middle, so the cat turns in place
+                pad = max(ox, oy, cv.w - SIZE - ox, cv.h - SIZE - oy)
+                sq = Canvas(SIZE + 2 * pad, SIZE + 2 * pad)
+                for y in range(cv.h):
+                    sq.px[y + pad - oy][pad - ox:pad - ox + cv.w] = cv.px[y]
+                cv, ox, oy = sq, pad, pad
+            # centre the whole cat on the canvas first, so nothing is cut off when it turns
+            box = cv.bbox()
+            if box is not None:
+                x0, y0, x1, y1 = box
+                mid = (cv.w - 1) / 2
+                cv = cv.shifted(int(round(mid - (x0 + x1) / 2)), int(round(mid - (y0 + y1) / 2)))
+            for _ in range(p.rot % 4):
+                cv = cv.rotated_ccw()
+        return cv, ox, oy
+    finally:
+        _WEAR["hat"] = _WEAR["head"] = None
+
+
+def _put_on(cv: Canvas, hat: object, c: int, ht: int) -> tuple[Canvas, int, int]:
+    """Draw the hat on the head (head centre column c, top fur row ht); the canvas grows
+    where the hat sticks out (plus 1 px for the rim)."""
+    from . import hats
+
+    rows = hat.rows  # type: ignore[attr-defined]
+    wp, hp = max(len(r) for r in rows), len(rows)
+    hc = hats.hat_canvas_of(hat)  # type: ignore[arg-type]
+    left = c - (wp - 1) // 2 + hat.dx - 1  # type: ignore[attr-defined]
+    top = ht + hat.seat - (hp - 1) - 1  # type: ignore[attr-defined]
+    pl, pt = max(0, 1 - left), max(0, 1 - top)
+    pr = max(0, left + hc.w + 1 - cv.w)
+    pb = max(0, top + hc.h + 1 - cv.h)
+    big = Canvas(cv.w + pl + pr, cv.h + pt + pb)
+    for y in range(cv.h):
+        big.px[y + pt][pl:pl + cv.w] = cv.px[y]
+    for y in range(hc.h):
+        for x in range(hc.w):
+            v = hc.px[y][x]
+            if v:
+                big.px[top + pt + y][left + pl + x] = OUT if v == 1 else hats.INDEX_BASE + v
+    return big, pl, pt

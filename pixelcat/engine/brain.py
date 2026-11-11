@@ -216,7 +216,7 @@ class Brain:
         self.prev_user_idle = ctx.user_idle
 
     def _game_owns(self) -> bool:
-        return self.game is not None and self.game.active and self.state == S.BALL
+        return self.game is not None and self.game.active and self.state in (S.BALL, S.GAME)
 
     # ================================================================ states
     def set_state(self, new: S, enter: tuple[str, ...] | None = None, travel: bool = True) -> None:
@@ -819,8 +819,15 @@ class Brain:
             self.show_bubble("bubble_exclaim", 1.2)
 
     # ================================================================ events
+    def playing(self) -> bool:
+        """A minigame is running: clicks and petting must not interrupt what the cat is doing."""
+        return self.game is not None and getattr(self.game, "active", False)
+
     def poke(self) -> None:
         """Single click."""
+        if self.playing():
+            self._hearts(1)          # a little heart, but the cat keeps playing
+            return
         now = self.clock
         self.pokes.append(now)
         while self.pokes and now - self.pokes[0] > self.t.poke_window_s:
@@ -847,6 +854,9 @@ class Brain:
             self.set_state(S.HAPPY, travel=False)
 
     def double_click(self) -> None:
+        if self.playing():
+            self._hearts(1)
+            return
         if STATES[self.state].asleep:
             self.poke()
             return
@@ -862,6 +872,11 @@ class Brain:
         """Called while the user strokes/holds the cat."""
         self.pet_fx = 0.4
         self.pet_time += dt
+        if self.playing():           # hearts only - no cuddling in the middle of a game
+            if self.fx_timer <= 0:
+                self.fx_timer = 0.55
+                self._hearts(1)
+            return
         self.needs.pet() if self.rng.random() < dt else None
         if self.fx_timer <= 0 or self.pet_time < dt * 1.5:
             self.fx_timer = 0.55
@@ -999,7 +1014,7 @@ class Brain:
     def current_anim(self) -> tuple[str, float]:
         if self.state == S.HELD:
             return ("dangle_happy" if self.needs.mood > 0.75 else "dangle"), self.anim_t
-        if self.game is not None and self.game.active and self.state == S.BALL:
+        if self.game is not None and self.game.active and self.state in (S.BALL, S.GAME):
             g = self.game.cat_anim()
             if g is not None and (self.mode != "ground" or not self.oneshot):
                 return g

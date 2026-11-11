@@ -2,6 +2,7 @@
 tray, desktop queries, persistence and the LLM tool layer together."""
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -12,10 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QPoint, QRect, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
-from . import paths
+from . import paths, progress
 from .desktop import system, win32
 from .desktop.monitors import Monitor, enumerate_monitors, monitor_at, primary
 from .desktop.windows import enumerate_windows, foreground_window, is_fullscreen_window
@@ -40,9 +41,15 @@ from .sprites.library import SpriteLibrary
 from .ui.ball import BallOverlay
 from .ui.chat import ChatWindow
 from .ui.dialogs import PixelDialog
+from .llm import models
+from .llm.model_status import model_on_disk
+from .ui import theme
 from .ui.menu import MenuItem, PixelMenu
 from .ui.overlay import CatOverlay
 from .ui.tray import Tray
+from . import games as minigames
+from .games.base import MiniGame
+from .games.qt_host import PopupWin, QtHost, art_pixmap
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +107,7 @@ class PixelCatApp(QObject):
         self.t = cfg.tuning
         self.saved = saved
         self.selftest = selftest
+        self._quitting = False
         self.rl = RateLimitedLogger(log)
         self.own_pid = os.getpid()
         self.quiet = saved.quiet
@@ -111,16 +119,38 @@ class PixelCatApp(QObject):
 
         self.needs = Needs(saved.energy, saved.hunger, saved.mood)
         self.needs.apply_offline(saved.last_seen, self.t)
-        self.sprites = SpriteLibrary("charcoal")
+        if not progress.is_unlocked(saved.xp, "skin", saved.skin):
+            saved.skin = "charcoal"
+        if saved.hat and not progress.is_unlocked(saved.xp, "hat", saved.hat):
+            saved.hat = ""
+        self.sprites = SpriteLibrary(saved.skin)       # Cosmetics -> Skins
         self.brain = Brain(self.t, self.needs)
         self.activity = system.ActivityTracker()
         self.overlay = CatOverlay(self.brain, self.sprites, self.t)
+        self.overlay.hat = saved.hat                   # Cosmetics -> Hats
         self.game = BallGame(self.brain)              # "Play": grab the ball, the cat hunts it
         self.game.best = saved.best_round
         self.game.on_end = self._game_ended
         self.brain.game = self.game
         self.ball_win = BallOverlay(self.game, self.sprites, self.t)
+        theme.configure(saved.ui_style, saved.ui_accent, saved.ui_size, saved.ui_font)   # the user's look
+        theme.on_change(self._on_style_changed)
+        # the minigames: their things (mice, shelves, the laser dot...) are small windows of their own
+        self.mini: MiniGame | None = None
+        self._real_wins: list[Any] = []                  # the last window list (props come on top)
+        self._popups: list[PopupWin] = []
+        self.host = QtHost(self.brain, self.sprites, lambda: self._real_wins, self.scale_for,
+                           self.t.min_surface_len, on_world=self._rebuild_world, work_area=self._game_work,
+                           ui_unit=self._game_unit, cat_hwnd=self.overlay.hwnd, on_hud_close=self.stop_minigame)
+        self.host.ctx = {"fish_book": saved.fish_book}
+        self.host.ended = self._mini_ended
+        self.hud = self.host.hud
         self.menu = PixelMenu(self.sprites)
+        self.model_menu = PixelMenu(self.sprites)        # the chat's model button
+        self.model_menu.title = "MODEL FOR THIS CHAT"
+        self.model_menu.triggered.connect(self._on_model_menu)
+        self.chat_model: str | None = None               # this chat only (None: the default)
+        self._download_ok: set[str] = set()              # models the user said yes to downloading
         self.menu.triggered.connect(self._on_menu)
         self.chat: ChatWindow | None = None
         self.tray = Tray(self.sprites)
@@ -129,7 +159,9 @@ class PixelCatApp(QObject):
 
         # chat / tools state
         # the AI: Ollama started and the model loaded in the background, status shown in the chat
-        self.model_status = ModelStatus(cfg, may_download=lambda: self.saved.model_download_ok)
+        self.model_status = ModelStatus(cfg, may_download=lambda: (self.saved.model_download_ok and
+                                                                  self.model_status.model == cfg.model)
+                                        or self.model_status.model in self._download_ok)
         self.model_status.changed.connect(self._on_model_status)
         self.watches = WatchManager(self.own_pid)        # long tasks: wait_for watches in the background
         self.watches.fired.connect(self._on_watch_fired)
@@ -164,8 +196,8 @@ class PixelCatApp(QObject):
 
         # overlay input -> brain
         ov = self.overlay
-        ov.clicked.connect(self.brain.poke)
-        ov.double_clicked.connect(self.brain.double_click)
+        ov.clicked.connect(self._on_cat_click)
+        ov.double_clicked.connect(self._on_cat_double)
         ov.petting.connect(self.brain.petting)
         ov.drag_started.connect(self._on_drag_start)
         ov.dragged.connect(self._on_drag)
@@ -200,7 +232,7 @@ class PixelCatApp(QObject):
         return max(1, int(round(self.t.base_pixel_scale * mon.dpi / 96.0)))
 
     def ui_unit(self, mon: Monitor) -> int:
-        return max(2, int(round(2 * mon.dpi / 96.0)))
+        return theme.unit_for_dpi(mon.dpi)       # follows Settings -> Size
 
     def start(self, warm_model: bool = False) -> None:
         """``warm_model``: start Ollama and load the model in the background (the real app)."""
@@ -257,11 +289,15 @@ class PixelCatApp(QObject):
 
     def quit(self) -> None:
         log.info("quitting")
+        self._quitting = True
         try:
             self.save()
             for tm in (self.tick_timer, self.win_timer, self.mon_timer, self.fs_timer, self.save_timer):
                 tm.stop()
             self.agent.cancel.set()
+            self.stop_minigame()
+            for pop in list(self._popups):
+                pop.close()
             self.esc_watch.stop()
             self.watches.stop()
             self.model_status.stop()
@@ -317,6 +353,9 @@ class PixelCatApp(QObject):
                       user_idle=self.activity.idle_seconds(), hour=datetime.now().hour, quiet=self.quiet,
                       scale=scale, cursor_over_cat=self.overlay.cursor_over)
             self.brain.update(dt, ctx)
+            mini = self.mini
+            if mini is not None and mini.active:
+                mini.update(dt, self.activity.cursor)
             self.overlay.sync(scale)
             if self.game.active or self.game.fx or self.ball_win.isVisible():
                 self.game.update(dt, self.activity.cursor)
@@ -334,8 +373,9 @@ class PixelCatApp(QObject):
             return
         try:
             wins = enumerate_windows(self.own_pid)
+            self._real_wins = wins
             rects = {w.hwnd: w.rect for w in wins}
-            if self._known_hwnds is not None and self.brain.mode == "ground":
+            if self._known_hwnds is not None and self.brain.mode == "ground" and not self._mini_active():
                 cat = self.overlay.cat_rect()
                 s = self.scale_for(monitor_at(self.monitors, self.brain.x, self.brain.y - 1))
                 for w in wins:
@@ -343,10 +383,15 @@ class PixelCatApp(QObject):
                         self.brain.startle()
                         break
             self._known_hwnds = set(rects)
-            smap = SurfaceMap.build(self.monitors, wins, self.scale_for, self.t.min_surface_len)
-            self.brain.set_world(smap, rects)
+            self._rebuild_world()
         except Exception:  # noqa: BLE001
             self.rl.exception("windows", "window refresh failed")
+
+    def _rebuild_world(self) -> None:
+        """The cat's surfaces: real windows plus the game's furniture (it is always on top)."""
+        wins = list(self._real_wins) + self.host.prop_infos()
+        smap = SurfaceMap.build(self.monitors, wins, self.scale_for, self.t.min_surface_len)
+        self.brain.set_world(smap, {w.hwnd: w.rect for w in wins})
 
     def _refresh_monitors(self) -> None:
         try:
@@ -383,11 +428,17 @@ class PixelCatApp(QObject):
             self.menu.close()
             self.overlay.hide()
             self.ball_win.hide()          # the game waits; the ball comes back with the cat
+            self.host.set_hidden(True)
+            for pop in self._popups:
+                pop.hide()
             self._chat_was_visible = self.chat is not None and self.chat.isVisible()
             if self._chat_was_visible and self.chat is not None:
                 self.chat.hide()
         else:
             self.overlay.reshow()
+            self.host.set_hidden(False)
+            for pop in self._popups:
+                pop.show()
             if self._chat_was_visible and self.chat is not None:
                 self.chat.show()
             self._last_tick = time.monotonic()
@@ -401,11 +452,15 @@ class PixelCatApp(QObject):
 
     def _keep_on_top(self) -> None:
         if not self.hidden_fullscreen and self.overlay.hwnd():
-            try:
-                win32.keep_topmost(self.overlay.hwnd())
-            except Exception:  # noqa: BLE001
-                pass
+            mini = self.mini if self._mini_active() else None
+            if mini is None or not mini.cat_z_locked:     # hide and seek: the cat stays behind its window
+                try:
+                    win32.keep_topmost(self.overlay.hwnd())
+                except Exception:  # noqa: BLE001
+                    pass
             self.ball_win.keep_on_top()   # the ball stays above the cat (it's in its mouth sometimes)
+            if mini is not None:
+                self.host.raise_all()     # the game's things (mice, shelves...) above the cat
 
     def _sync_tray(self) -> None:
         n = len(self.watches.active())
@@ -418,6 +473,18 @@ class PixelCatApp(QObject):
     def _on_drag_start(self) -> None:
         self.menu.close()
         self.brain.pick_up()
+
+    def _on_cat_click(self) -> None:
+        mini = self.mini if self._mini_active() else None
+        if mini is not None and mini.on_cat_click():     # hide and seek: found you!
+            return
+        self.brain.poke()
+
+    def _on_cat_double(self) -> None:
+        mini = self.mini if self._mini_active() else None
+        if mini is not None and mini.on_cat_click():
+            return
+        self.brain.double_click()
 
     def _on_drag(self, x: int, y: int) -> None:
         self.brain.drag_to(x, y)
@@ -438,26 +505,269 @@ class PixelCatApp(QObject):
                 self.brain.drop(0.0, 0.0)
             return
         b = self.brain
-        self.menu.items = [
-            MenuItem("pause", "Resume" if b.paused else "Pause", "play" if b.paused else "pause"),
-            MenuItem("chat", "Chat", "chat"),
-            MenuItem("feed", "Feed", "fish"),
-            MenuItem("play", "Stop playing" if self.game.active else "Play ball", "yarn"),
-            MenuItem("quiet", "Quiet mode", checked=self.quiet, separator_before=True),
-            MenuItem("autostart", "Start with Windows", checked=system.autostart_enabled()),
-            MenuItem("automode", "Chat auto mode", checked=self.saved.auto_mode),
-            MenuItem("quit", "Quit", "power", separator_before=True),
-        ]
+        self.menu.items = self._menu_items()
         self.menu.subtitle = b.state.value.replace("_", " ")
         mon = monitor_at(self.monitors, b.x, b.y - 1)
         self.menu.popup_near(self.overlay.cat_rect(), mon.work, self.ui_unit(mon))
 
+    def _menu_items(self) -> list[MenuItem]:
+        """Pause, Chat and Quit on top; everything else in the Minigames, Cosmetics and Settings sections."""
+        b = self.brain
+        games = self._game_items()
+        settings = [
+            MenuItem("set_style", "Style", "paint", children=[
+                MenuItem(f"style:{k}", s.name, radio=True, checked=theme.choice("style") == k)
+                for k, s in theme.STYLES.items()]),
+            MenuItem("set_accent", "Accent color", "dot", children=[
+                MenuItem(f"accent:{k}", "Style's own" if k == "default" else k.capitalize(),
+                         swatch=QColor(theme.STYLES[theme.choice("style")].accent if v is None else v[0]),
+                         checked=theme.choice("accent") == k)
+                for k, v in theme.ACCENTS.items()]),
+            MenuItem("set_size", "Size", "plus", children=[
+                MenuItem(f"size:{k}", k.capitalize(), radio=True, checked=theme.choice("size") == k)
+                for k in theme.SIZES]),
+            MenuItem("set_font", "Font", "chat", children=[
+                MenuItem(f"font:{k}", {"default": "Style's own", "pixel": "Pixel", "clean": "Clean"}[k], radio=True,
+                         checked=theme.choice("font") == k) for k in theme.FONTS]),
+            MenuItem("set_model", "AI model", "bolt_on", children=self._model_items("model:", self.cfg.model)),
+            MenuItem("quiet", "Quiet mode", checked=self.quiet, separator_before=True),
+            MenuItem("autostart", "Start with Windows", checked=system.autostart_enabled()),
+            MenuItem("automode", "Chat auto mode", checked=self.saved.auto_mode),
+            MenuItem("preload_ai", "Load AI at start", checked=self.cfg.preload_on_start)]
+        return [
+            MenuItem("pause", "Resume" if b.paused else "Pause", "play" if b.paused else "pause"),
+            MenuItem("chat", "Chat", "chat"),
+            MenuItem("games", "Minigames", "gamepad", children=games, separator_before=True),
+            MenuItem("cosmetics", "Cosmetics", "hat", children=self._cosmetic_items()),
+            MenuItem("settings", "Settings", "gear", children=settings),
+            MenuItem("quit", "Quit", "power", separator_before=True),
+        ]
+
+    def _game_items(self) -> list[MenuItem]:
+        """Every minigame: locked ones show the Cat Pass stage that unlocks them."""
+        st = self.saved
+        running = self._running_game()
+        out: list[MenuItem] = []
+        for key in minigames.ORDER:
+            title = minigames.title(key)
+            if key == running:
+                out.append(MenuItem("stopgame", "Stop playing ball" if key == "ball" else f"Stop {title}", "close"))
+            elif not progress.is_unlocked(st.xp, "game", key):
+                out.append(MenuItem(f"game:{key}", title, minigames.ICONS[key], locked=True,
+                                    note=f"STAGE {progress.stage_of('game', key)}"))
+            else:
+                plays = st.plays if key == "ball" else st.game_plays.get(key, 0)
+                out.append(MenuItem(f"game:{key}", title, minigames.ICONS[key], note="NEW!" if not plays
+                                    else self._best_note(key)))
+        out.append(MenuItem("feed", "Feed", "fish", separator_before=True))
+        return out
+
+    def _best_note(self, key: str) -> str:
+        if key == "ball":
+            return f"BEST {self.saved.best_round}" if self.saved.best_round else ""
+        best = self.saved.game_best.get(key)
+        if best is None:
+            return ""
+        return f"BEST {best:g} S" if minigames.GAMES[key].lower_is_better else f"BEST {best:g}"
+
+    def _cosmetic_items(self) -> list[MenuItem]:
+        """The Cat Pass (stages and what they unlock), skins and hats."""
+        st = self.saved
+        ps = progress.state(st.xp)
+        u = self._game_unit()
+        hat_scale = max(1, (9 * u + 2) // 13)
+        stages = [MenuItem("pass_total", f"{st.xp} XP in total", "star", info=True,
+                           note=(f"NEXT STAGE IN {ps.cost - ps.into} XP" if ps.cost else "ALL DONE!"))]
+        hi = min(progress.MAX_STAGE, max(ps.stage + 5, 8))
+        lo = max(2, hi - 7)
+        for n in range(lo, hi + 1):
+            kind, key = progress.REWARDS[n - 2]
+            got = n <= ps.stage
+            need = progress.xp_to_reach(n) - st.xp
+            stages.append(MenuItem(f"pass:{n}", f"{n}. {progress.name_of(kind, key)}", "star", info=True,
+                                   locked=not got, note=kind.upper() if got else f"{need} XP",
+                                   picture=self._reward_picture(kind, key, u, hat_scale)))
+        skins = []
+        for key, name in progress.SKINS.items():
+            ok = progress.is_unlocked(st.xp, "skin", key)
+            skins.append(MenuItem(f"skin:{key}", name, radio=True, checked=st.skin == key, locked=not ok,
+                                  note="" if ok else f"STAGE {progress.stage_of('skin', key)}",
+                                  picture=self.sprites.skin_icon(key, 9 * u)))
+        hats = [MenuItem("hat:", "No hat", radio=True, checked=not st.hat)]
+        for key, name in progress.HATS.items():
+            ok = progress.is_unlocked(st.xp, "hat", key)
+            hats.append(MenuItem(f"hat:{key}", name, radio=True, checked=st.hat == key, locked=not ok,
+                                 note="" if ok else f"STAGE {progress.stage_of('hat', key)}",
+                                 picture=self.sprites.hat(key, hat_scale, False)))
+        return [MenuItem("pass", "Cat Pass", "star", note=f"STAGE {ps.stage}", bar=ps.fraction, children=stages),
+                MenuItem("skins", "Skins", "skin", children=skins),
+                MenuItem("hats", "Hats", "hat", children=hats)]
+
+    def _reward_picture(self, kind: str, key: str, u: int, hat_scale: int) -> QPixmap | None:
+        try:
+            if kind == "skin":
+                return self.sprites.skin_icon(key, 9 * u)
+            if kind == "hat":
+                return self.sprites.hat(key, hat_scale, False)
+            return self.sprites.icon(minigames.ICONS.get(key, "gamepad"), u)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _model_items(self, prefix: str, current: str) -> list[MenuItem]:
+        """One radio item per model: name, download size, and whether it is here / fits this PC."""
+        from .installer import total_ram_gb
+
+        ram = getattr(self, "_ram_gb", None) or total_ram_gb()
+        self._ram_gb = ram
+        best = models.recommended(ram).tag
+        out = []
+        for m in models.MODELS:
+            note = f"{m.download_gb:g} GB"
+            if model_on_disk(m.tag):
+                note += " READY"
+            elif m.ram_gb > ram:
+                note += " TOO BIG"
+            if m.tag == best:
+                note += " BEST"
+            out.append(MenuItem(prefix + m.tag, f"{m.name} {m.short}", radio=True,
+                                checked=models.find(current) is m if models.find(current) else False, note=note))
+        return out
+
+    def _on_style_changed(self) -> None:
+        """Settings -> Style/Accent/Size/Font: every window takes the new look at once."""
+        if self.chat is not None:
+            self.chat.restyle()
+        self.tray.restyle()
+        if self.menu.isVisible():
+            mon = monitor_at(self.monitors, self.brain.x, self.brain.y - 1)
+            self.menu.refresh(self._menu_items(), self.ui_unit(mon))
+        else:
+            self.menu.update()
+        hud = getattr(self, "hud", None)
+        if hud is not None:
+            hud.restyle()
+
+    def _set_look(self, kind: str, value: str) -> None:
+        setattr(self.saved, f"ui_{kind}", value)
+        self.save()
+        theme.configure(**{kind: value})
+        log.info("look: %s = %s", kind, value)
+
+    # ---------------------------------------------------------------- AI model choice
+    def _effective_model(self) -> str:
+        return self.chat_model or self.cfg.model
+
+    def _update_model_chip(self) -> None:
+        if self.chat is None:
+            return
+        m = models.find(self._effective_model())
+        short = m.short if m else self._effective_model().split(":")[-1][:6].upper()
+        tip = (f"This chat uses {models.label(self._effective_model())} - click to change it. "
+               f"The default is {models.label(self.cfg.model)} (Settings -> AI model).")
+        self.chat.set_model_chip(short, self.chat_model is not None, tip)
+
+    def _choose_default_model(self, tag: str) -> None:
+        if tag == self.cfg.model:
+            return
+        if model_on_disk(tag):
+            self._set_default_model(tag)
+            return
+        m = models.find(tag)
+        self.open_chat()
+        assert self.chat is not None
+        size = f" ({m.download_gb:g} GB)" if m else ""
+        self.chat.ask_confirm(f"download {models.label(tag)}{size} and make it the default model",
+                              lambda ans, t=tag: self._set_default_model(t, download=True) if ans == "yes"
+                              else self.chat.add("info", f"Okay, the default stays {models.label(self.cfg.model)}."))
+
+    def _set_default_model(self, tag: str, download: bool = False) -> None:
+        from .settings import save_user_setting
+
+        self.cfg.model = tag
+        save_user_setting("model", tag)
+        if download:
+            self._download_ok.add(tag)
+        log.info("default model: %s", tag)
+        if self.chat is not None:
+            self.chat.add("info", f"Default AI model: {models.label(tag)}" +
+                          (" - downloading it now, the bar above shows how far it is." if download else "."))
+        self.model_status.ensure(force=True)
+        self._update_model_chip()
+
+    def _open_model_menu(self) -> None:
+        """The chat's model button: pick a model for this chat only."""
+        if self.chat is None:
+            return
+        items = [MenuItem("chatmodel:default", f"Default ({models.label(self.cfg.model)})", radio=True,
+                          checked=self.chat_model is None)]
+        items += self._model_items("chatmodel:", self.chat_model or "")
+        self.model_menu.items = items
+        g = self.chat.model_btn.mapToGlobal(self.chat.model_btn.rect().topLeft())
+        mon = monitor_at(self.monitors, self.brain.x, self.brain.y - 1)
+        r = (g.x(), g.y(), g.x() + self.chat.model_btn.width(), g.y() + self.chat.model_btn.height())
+        self.model_menu.popup_near(r, mon.work, self.ui_unit(mon))
+
+    def _on_model_menu(self, key: str) -> None:
+        if not key.startswith("chatmodel:"):
+            return
+        self.model_menu.close()
+        tag = key.split(":", 1)[1]
+        self._choose_chat_model(None if tag == "default" else tag)
+
+    def _choose_chat_model(self, tag: str | None) -> None:
+        assert self.chat is not None
+        if tag is not None and models.find(tag) is None:
+            self.chat.add("info", "I don't know that model. Models: " +
+                          ", ".join(f"{m.name} ({m.short})" for m in models.MODELS) + ".")
+            return
+        if tag is not None and models.find(tag).tag == self.cfg.model:
+            tag = None
+        if tag is not None and not model_on_disk(models.find(tag).tag):
+            m = models.find(tag)
+            self.chat.ask_confirm(f"download {models.label(m.tag)} ({m.download_gb:g} GB) for this chat",
+                                  lambda ans, t=m.tag: (self._download_ok.add(t), self._set_chat_model(t))
+                                  if ans == "yes" else self.chat.add("info", "Okay, no download."))
+            return
+        self._set_chat_model(models.find(tag).tag if tag else None)
+
+    def _set_chat_model(self, tag: str | None) -> None:
+        self.chat_model = tag
+        self.model_status.override = tag
+        self.model_status.ensure(force=True)
+        self._update_model_chip()
+        if self.chat is not None:
+            self.chat.add("info", f"This chat now uses {models.label(tag)}. A new chat goes back to the default, "
+                                  f"{models.label(self.cfg.model)}." if tag else
+                          f"This chat uses the default model again: {models.label(self.cfg.model)}.")
+
     def _on_menu(self, key: str) -> None:
         try:
             b = self.brain
-            if key == "pause":
-                if not b.paused and self.game.active:
+            for kind in ("style", "accent", "size", "font"):
+                if key.startswith(kind + ":"):
+                    self._set_look(kind, key.split(":", 1)[1])
+                    return
+            if key.startswith("model:"):
+                self._choose_default_model(key.split(":", 1)[1])
+                if self.menu.isVisible():
+                    self.menu.refresh(self._menu_items())
+                return
+            if key.startswith("game:"):
+                self.start_minigame(key.split(":", 1)[1])
+                return
+            if key.startswith("skin:"):
+                self._set_skin(key.split(":", 1)[1])
+            elif key.startswith("hat:"):
+                self._set_hat(key.split(":", 1)[1])
+            elif key == "stopgame":
+                self.stop_minigame()
+                if self.game.active:
                     self.game.stop()
+            elif key == "pause":
+                if not b.paused:
+                    self.stop_minigame()
+                    if self.game.active:
+                        self.game.stop()
                 b.set_paused(not b.paused)
             elif key == "chat":
                 self.open_chat()
@@ -467,8 +777,7 @@ class PixelCatApp(QObject):
                 if self.game.active:
                     self.game.stop()
                 else:
-                    self.saved.plays += 1
-                    b.play()
+                    self.start_minigame("ball")
             elif key == "quiet":
                 self.quiet = not self.quiet
                 if self.quiet and not b.paused:
@@ -480,7 +789,15 @@ class PixelCatApp(QObject):
             elif key == "autostart":
                 system.set_autostart(not system.autostart_enabled())
                 self.saved.autostart_asked = True
+            elif key == "preload_ai":
+                from .settings import save_user_setting
+
+                self.cfg.preload_on_start = not self.cfg.preload_on_start
+                save_user_setting("preload_on_start", self.cfg.preload_on_start)
+                if self.cfg.preload_on_start and not self.selftest:
+                    self.model_status.ensure()
             elif key == "find":
+                self.stop_minigame()              # (hide and seek: no cheating - the round ends)
                 p = primary(self.monitors)
                 b.plan.clear()
                 b.place((p.work[0] + p.work[2]) / 2, p.work[3] - 200)
@@ -488,16 +805,235 @@ class PixelCatApp(QObject):
             elif key == "quit":
                 self.quit()
             self._sync_tray()
+            if self.menu.isVisible():
+                self.menu.refresh(self._menu_items())   # a toggled setting shows its new state
         except Exception:  # noqa: BLE001
             log.exception("menu action %s failed", key)
 
     def _game_ended(self, rounds: int) -> None:
-        """A ball game is over: remember the best one."""
+        """A ball game is over: remember the best one, XP for the Cat Pass."""
         log.info("ball game over after %d round(s) (best so far %d)", rounds, self.saved.best_round)
+        best = ""
         if rounds > self.saved.best_round:
+            if self.saved.best_round:
+                best = f"New record: {rounds} catches!"
             self.saved.best_round = rounds
             self.game.best = rounds
+        xp = min(90, 15 + rounds * 12) if rounds else 0
+        result = f"The cat caught the ball {rounds} time{'s' if rounds != 1 else ''}!" if rounds else ""
+        self._award("ball", "Play ball", xp, result, best)
+
+    # ================================================================ minigames
+    def _mini_active(self) -> bool:
+        return self.mini is not None and self.mini.active
+
+    def _running_game(self) -> str | None:
+        if self._mini_active():
+            assert self.mini is not None
+            return self.mini.key
+        return "ball" if self.game.active else None
+
+    def _cat_monitor(self) -> Monitor:
+        return monitor_at(self.monitors, self.brain.x, self.brain.y - 1)
+
+    def _game_work(self) -> tuple[int, int, int, int]:
+        return self._cat_monitor().work
+
+    def _game_unit(self) -> int:
+        return self.ui_unit(self._cat_monitor())
+
+    def start_minigame(self, key: str) -> None:
+        """Menu -> Minigames.  The first time, a little window explains the game."""
+        if key != "ball" and key not in minigames.GAMES:
+            return
+        if not progress.is_unlocked(self.saved.xp, "game", key):
+            self.brain.show_bubble("bubble_question", 1.5)
+            return
+        if self.hidden_fullscreen:
+            return
+        if key not in self.saved.tutorials_seen and not self.selftest:
+            self._show_tutorial(key)
+            return
+        self._begin_game(key)
+
+    def _show_tutorial(self, key: str) -> None:
+        for pop in list(self._popups):
+            if getattr(pop, "kind", "") == "tutorial":
+                pop.close()
+                self._popups.remove(pop)
+        text = "".join(f"<p style='margin:0 0 6px 0'>{html.escape(t)}</p>" for t in minigames.tutorial(key))
+        pop = self._popup(minigames.title(key), text, "LET'S PLAY!", "NOT NOW", self._game_picture(key))
+        pop.kind = "tutorial"  # type: ignore[attr-defined]
+        pop.answered.connect(lambda ok, k=key: self._tutorial_answer(k, ok))
+
+    def _tutorial_answer(self, key: str, ok: bool) -> None:
+        if not ok:
+            return                         # explained again next time
+        if key not in self.saved.tutorials_seen:
+            self.saved.tutorials_seen.append(key)
+            self.save()
+        self._begin_game(key)
+
+    def _game_picture(self, key: str) -> QPixmap | None:
+        u = self._game_unit()
+        try:
+            if key == "ball":
+                return self.sprites.effect("yarn0", u + 1)
+            return art_pixmap(minigames.PICTURES[key], u + 1)[0]
+        except Exception:  # noqa: BLE001
+            log.exception("no picture for %s", key)
+            return None
+
+    def _popup(self, title: str, text: str, ok: str, cancel: str | None = None,
+               picture: QPixmap | None = None) -> PopupWin:
+        pop = PopupWin(self.sprites, title, text, ok, cancel, picture)
+        self._popups.append(pop)
+        pop.answered.connect(lambda _ok, pp=pop: self._popups.remove(pp) if pp in self._popups else None)
+        mon = self._cat_monitor()
+        pop.show_near(self.overlay.cat_rect(), mon.work, self.ui_unit(mon), mon.dpi)
+        if self.hidden_fullscreen:
+            pop.hide()
+        return pop
+
+    def _begin_game(self, key: str) -> None:
+        if self.hidden_fullscreen or not progress.is_unlocked(self.saved.xp, "game", key):
+            return
+        self.menu.close()
+        self.stop_minigame()
+        if self.game.active:
+            self.game.stop()
+        b = self.brain
+        if b.state == S.HELD:
+            self.overlay.cancel_press()
+            b.drop(0.0, 0.0)
+        if key == "ball":
+            self.saved.plays += 1
+            b.game = self.game
+            b.play()
+            return
+        self.saved.game_plays[key] = self.saved.game_plays.get(key, 0) + 1
+        self._rebuild_world()
+        mini = minigames.GAMES[key](self.host)
+        self.mini = mini
+        self.overlay.raise_on_move = False      # the game's windows stay above the cat
+        try:
+            mini.start()
+        except Exception:  # noqa: BLE001
+            log.exception("minigame %s failed to start", key)
+            self.mini = None
+            b.game = self.game
+            self.overlay.raise_on_move = True
+            self.host.clear()
+            self._rebuild_world()
+
+    def stop_minigame(self) -> None:
+        """The HUD's X, Pause, Quit, or another game: end the running minigame (not Play ball)."""
+        if self._mini_active():
+            assert self.mini is not None
+            self.mini.stop()
+
+    def _mini_ended(self, game: MiniGame) -> None:
+        """A minigame is over (finished or stopped): XP, best score, the result."""
+        self.overlay.raise_on_move = True
+        if self.brain.game is game:
+            self.brain.game = self.game
+        if self.mini is game:
+            self.mini = None
+        try:
+            if self.overlay.hwnd():
+                win32.keep_topmost(self.overlay.hwnd())
+        except Exception:  # noqa: BLE001
+            pass
+        st = self.saved
+        st.fish_book = self.host.ctx.get("fish_book", st.fish_book)
+        xp = game.xp()
+        if game.ends_by_stop:                   # a sandbox: XP for the time spent playing
+            xp = int(xp * min(1.0, game.t / 60.0))
+        elif not game.finished:                 # stopped early: a little XP for the time played
+            xp = int(xp * 0.5 * min(1.0, game.t / max(30.0, game.duration or 60.0)))
+        if game.t < 8:
+            xp = 0
+        best = ""
+        if (game.finished or game.ends_by_stop) and game.score:
+            old = st.game_best.get(game.key)
+            better = old is None or (game.score < old if game.lower_is_better else game.score > old)
+            if better:
+                st.game_best[game.key] = game.score
+                if old is not None:
+                    best = "New record!"
+        self._award(game.key, game.title, xp, game.result, best)
+
+    def _award(self, key: str, title: str, xp: int, result: str, best: str) -> None:
+        """Cat Pass XP; a little window shows the result and anything newly unlocked."""
+        st = self.saved
+        old = st.xp
+        st.xp = old + max(0, int(xp))
+        unlocks = progress.new_unlocks(old, st.xp)
         self.save()
+        log.info("%s: +%d XP (total %d), unlocked %s", key, xp, st.xp, unlocks)
+        if self._quitting or self.selftest or (not xp and not result):
+            return
+        b = self.brain
+        if xp:
+            self.host.float_text(f"+{xp} XP", b.x, b.y - 46 * b.scale, "#ffd84a")
+        ps = progress.state(st.xp)
+        lines = [html.escape(result or "Game over!")]
+        if best:
+            lines.append(f"<b>{html.escape(best)}</b>")
+        if xp:
+            stage = (f"Cat Pass stage {ps.stage}: {ps.into}/{ps.cost} XP" if ps.cost
+                     else "The Cat Pass is complete!")
+            lines.append(f"<b>+{xp} XP</b> &middot; {stage}")
+        ok, cancel, picture = "NICE!", None, None
+        for n, kind, k in unlocks:
+            what = {"game": "minigame", "skin": "skin", "hat": "hat"}[kind]
+            lines.append(f"<b>Stage {n}! New {what}: {html.escape(progress.name_of(kind, k))}</b>")
+        if unlocks:
+            n, kind, k = unlocks[-1]
+            u = self._game_unit()
+            picture = self._reward_picture(kind, k, u + (2 if kind == "game" else 0), max(2, u))
+            if len(unlocks) == 1 and kind in ("skin", "hat"):
+                ok, cancel = "PUT IT ON", "LATER"
+            elif len(unlocks) == 1 and kind == "game":
+                ok, cancel = "PLAY IT", "LATER"
+            if kind == "game" and picture is None:
+                picture = self._game_picture(k)
+        text = "".join(f"<p style='margin:0 0 5px 0'>{ln}</p>" for ln in lines)
+        pop = self._popup(title, text, ok, cancel, picture)
+        if unlocks and cancel:
+            n, kind, k = unlocks[-1]
+            pop.answered.connect(lambda yes, kd=kind, kk=k: self._use_unlock(kd, kk) if yes else None)
+        pop.close_later(40 if unlocks else 12)
+
+    def _use_unlock(self, kind: str, key: str) -> None:
+        if kind == "skin":
+            self._set_skin(key)
+        elif kind == "hat":
+            self._set_hat(key)
+        elif kind == "game":
+            self.start_minigame(key)
+
+    def _set_skin(self, key: str) -> None:
+        if key not in progress.SKINS or not progress.is_unlocked(self.saved.xp, "skin", key):
+            return
+        self.saved.skin = key
+        self.sprites.set_skin(key)
+        self.tray.refresh_icon()
+        self.overlay.update()
+        self.brain.show_bubble("bubble_heart", 1.2)
+        self.save()
+        log.info("skin: %s", key)
+
+    def _set_hat(self, key: str) -> None:
+        if key and (key not in progress.HATS or not progress.is_unlocked(self.saved.xp, "hat", key)):
+            return
+        self.saved.hat = key
+        self.overlay.hat = key
+        self.overlay.update()
+        if key:
+            self.brain.show_bubble("bubble_heart", 1.2)
+        self.save()
+        log.info("hat: %s", key or "none")
 
     # ================================================================ chat
     def _ensure_chat(self) -> ChatWindow:
@@ -508,9 +1044,11 @@ class PixelCatApp(QObject):
             self.chat.new_chat_requested.connect(self.new_chat)
             self.chat.auto_toggled.connect(lambda: self.set_auto_mode(not self.saved.auto_mode))
             self.chat.watch_cancel_requested.connect(self._cancel_watch)
+            self.chat.model_menu_requested.connect(self._open_model_menu)
             self.chat.set_auto_mode(self.saved.auto_mode)
             self.chat.set_watches([(w.id, w.short()) for w in self.watches.active()])
             self.chat.set_model_banner(self.model_status.banner())
+            self._update_model_chip()
         return self.chat
 
     def _show_chat_quietly(self) -> None:
@@ -541,6 +1079,11 @@ class PixelCatApp(QObject):
         self.agent.shot = None
         self.agent.last_hwnd = 0
         self.history.clear()
+        if self.chat_model is not None:              # a new chat starts with the default model
+            self.chat_model = None
+            self.model_status.override = None
+            self.model_status.ensure(force=True)
+            self._update_model_chip()
         self._sent = None
         self._pending_calls.clear()
         self._tool_round = 0
@@ -642,6 +1185,17 @@ class PixelCatApp(QObject):
             assert self.chat is not None
             self.chat.add("info", "Okay! I'll ask before every action again 🐾")
             return True
+        if cmd == "/model" or cmd.startswith("/model "):
+            assert self.chat is not None
+            arg = cmd[6:].strip()
+            if not arg:
+                self.chat.add("info", f"This chat uses {models.label(self._effective_model())}. "
+                                      "Pick another for this chat with the model button next to SEND or /model NAME "
+                                      "(" + ", ".join(m.short for m in models.MODELS) + "); /model default goes back. "
+                                      "The default model is in Settings -> AI model.")
+            else:
+                self._choose_chat_model(None if arg == "default" else arg)
+            return True
         if cmd in ("/getmodel", "/get model", "/downloadmodel", "/download-model"):
             assert self.chat is not None
             self.saved.model_download_ok = True
@@ -668,7 +1222,8 @@ class PixelCatApp(QObject):
             assert self.chat is not None
             self.chat.add("info", "Commands: /new (fresh chat), /auto on|off (no permission cards), "
                                   "/force end <app> (like Task Manager), /force open <app> (as admin), "
-                                  "/watches, /unwatch, /getmodel (download the AI model), /permissions, "
+                                  "/watches, /unwatch, /model (AI model for this chat), /getmodel (download "
+                                  "the AI model), /permissions, "
                                   "/permissions reset. "
                                   "Ask me to open, close, switch or minimize apps, search the web, control music, "
                                   "take screenshots, set timers, check the system and more! I can also SEE your "
@@ -910,7 +1465,7 @@ class PixelCatApp(QObject):
         sys_msg = {"role": "system", "content": build_system_prompt(self.toolbox.names() if self.cfg.enable_tools else [])}
         msgs = [sys_msg] + self._context()
         tools = self.toolbox.schemas() if (self.cfg.enable_tools and self.native_tools) else None
-        worker = ChatWorker(self.cfg, msgs, tools, self._think_now())
+        worker = ChatWorker(self.cfg, msgs, tools, self._think_now(), model=self._effective_model())
         worker.token.connect(self._on_token)
         worker.thinking.connect(self._on_thinking)
         worker.done.connect(self._on_done)
@@ -1046,7 +1601,7 @@ class PixelCatApp(QObject):
             self._request()  # retry using the text tool protocol
             return
         self.chat.end_cat()
-        self.chat.add("error", friendly_error(kind, detail, self.cfg.model, self.cfg.ollama_url))
+        self.chat.add("error", friendly_error(kind, detail, self._effective_model(), self.cfg.ollama_url))
         self._end_task()
 
     def _next_call(self) -> None:
@@ -1265,6 +1820,8 @@ class PixelCatApp(QObject):
         return f"Copied {len(text)} characters to the clipboard."
 
     def _tool_cat_action(self, action: str) -> str:
+        if self._mini_active() or self.game.active:
+            return "The cat is in the middle of a minigame right now - it will do that afterwards."
         return self.brain.command(action)
 
     def _tool_set_timer(self, seconds: float, label: str) -> str:

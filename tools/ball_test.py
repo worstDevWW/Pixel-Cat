@@ -162,7 +162,7 @@ def run_game(seed: int, style: str, limit: float = 900.0) -> dict:
     if game.active:
         errs.append(f"game still running after {t:.0f}s in {game.phase}")
     stats["catches"] = game.catches
-    return {"errs": errs, "catches": game.catches, "ended": ended, "misses": misses_before_catch,
+    return {"errs": errs, "catches": game.catches, "round": game.round, "ended": ended, "misses": misses_before_catch,
             "total_misses": game.total_misses, "time": t, "phases": phases_seen, "state": brain.state,
             "floor_only": brain.floor_only}
 
@@ -182,6 +182,9 @@ def main() -> int:
     allr = [r for v in by_style.values() for r in v]
     check("every game ended by itself with at least one catch", all(r["ended"] and r["catches"] >= 1 for r in allr),
           f"{sum(1 for r in allr if not r['ended'])} not ended")
+    check("each catch counts once (grabbing its own batted ball back is not a new catch)",
+          all(r["round"] - 1 <= r["catches"] <= r["round"] for r in allr),
+          str([(r["catches"], r["round"]) for r in allr if not r["round"] - 1 <= r["catches"] <= r["round"]][:5]))
     check("after the game the cat is back to normal (not playing, lands on title bars again)",
           all(r["state"] != S.BALL and not r["floor_only"] for r in allr))
     m = [x for r in allr for x in r["misses"]]

@@ -19,7 +19,9 @@ class SavedState:
     energy: float = 0.8
     hunger: float = 0.2
     mood: float = 0.7
-    skin: str = "charcoal"          # kept for file compatibility; there is one cat
+    skin: str = "charcoal"                   # Cosmetics -> Skins (unlocked through the Cat Pass)
+    hat: str = ""                            # Cosmetics -> Hats ("" = no hat)
+    xp: int = 0                              # Cat Pass XP from minigames (the stage follows from it)
     quiet: bool = False
     autostart_asked: bool = False
     last_seen: float = field(default_factory=time.time)
@@ -29,7 +31,15 @@ class SavedState:
     feeds: int = 0
     plays: int = 0
     best_round: int = 0                      # most rounds in one ball game
+    game_best: dict[str, float] = field(default_factory=dict)    # best score per minigame
+    game_plays: dict[str, int] = field(default_factory=dict)     # how often each minigame was played
+    tutorials_seen: list[str] = field(default_factory=list)      # games whose explanation was shown
+    fish_book: dict[str, Any] = field(default_factory=dict)      # Fishing: every kind of fish caught
     model_download_ok: bool = False          # the user agreed to download the AI model (installer, /getmodel)
+    ui_style: str = "catchat"                # Settings -> Style / Accent color / Size / Font
+    ui_accent: str = "default"
+    ui_size: str = "normal"
+    ui_font: str = "default"
     auto_approved_tools: list[str] = field(default_factory=list)  # chat tools the user said ALWAYS to
     auto_mode: bool = False                  # chat actions run without confirmation cards
     watches: list[dict[str, Any]] = field(default_factory=list)   # wait_for watches (long tasks) to resume
@@ -51,6 +61,21 @@ def load_state() -> SavedState:
     st.energy = min(1.0, max(0.0, float(st.energy)))
     st.hunger = min(1.0, max(0.0, float(st.hunger)))
     st.mood = min(1.0, max(0.0, float(st.mood)))
+    # the game/cosmetics fields: wrong types (hand-edited file) fall back to defaults
+    fresh = SavedState()
+    for name in ("game_best", "game_plays", "fish_book"):
+        if not isinstance(getattr(st, name), dict):
+            setattr(st, name, getattr(fresh, name))
+    if not isinstance(st.tutorials_seen, list):
+        st.tutorials_seen = []
+    try:
+        st.xp = max(0, int(st.xp))
+    except (TypeError, ValueError):
+        st.xp = 0
+    if not isinstance(st.skin, str):
+        st.skin = "charcoal"
+    if not isinstance(st.hat, str):
+        st.hat = ""
     return st
 
 

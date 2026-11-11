@@ -41,7 +41,7 @@ class PixelDialog(QWidget):
         self.u = max(1, u)
         px = theme.font_px_for_dpi(48 * self.u, 10)
         self.setStyleSheet(theme.chat_stylesheet(max(1, u // 2 + u % 2), px)
-                           + f"QLabel {{ color:#3a2129; font-family:'Segoe UI'; font-size:{px}px; }}")
+                           + f"QLabel {{ color:{theme.current().text}; font-family:'Segoe UI'; font-size:{px}px; }}")
         self.lay.setContentsMargins(6 * u, 6 * u, 7 * u, 7 * u)
         self.setFixedWidth(150 * u)
         self.adjustSize()

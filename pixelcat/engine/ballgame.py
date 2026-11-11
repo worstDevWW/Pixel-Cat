@@ -19,6 +19,7 @@ How a round goes:
 """
 from __future__ import annotations
 
+import logging
 import math
 import random
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ from typing import TYPE_CHECKING, Any
 
 from .planner import Step
 from .states import S
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .brain import Brain
@@ -144,6 +147,9 @@ class BallGame:
         self.step = ""
         self.own_t = 0.0
         self.patience = 0.0
+        self.overlap_t = 0.0          # how long the ball has been lying inside the cat
+        self.stall_t = 0.0            # how long the chase made no progress
+        self.stall_x = 0.0
         self.cursor: tuple[int, int] | None = None
 
     def has(self, feature: str) -> bool:
@@ -428,6 +434,39 @@ class BallGame:
             "recover": max(0.15, 0.55 - 0.08 * m),
         }
 
+    def _ball_in_cat(self) -> bool:
+        """Is the ball lying (or being held) right inside the cat's body?"""
+        b, s, ball = self.brain, self.s, self.ball
+        return abs(ball.x - b.x) < 12 * s + ball.r * 0.5 and b.y - 28 * s < ball.y < b.y + ball.r
+
+    def _unstick(self, dt: float) -> bool:
+        """A ball under its own paws is simply grabbed; and a chase that makes no progress
+        for 5 s ends with the cat grabbing the ball - so it can never chase in a loop."""
+        b, s, ball = self.brain, self.s, self.ball
+        if b.mode != "ground" or ball.attached or not ball.visible:
+            self.overlap_t = 0.0
+            return False
+        self.overlap_t = self.overlap_t + dt if self._ball_in_cat() else 0.0
+        moved = abs(b.x - self.stall_x) > 30 * s
+        self.stall_x = b.x if moved else self.stall_x
+        busy_hand = ball.held and math.hypot(*self.held_velocity()) > 60 * s
+        self.stall_t = 0.0 if (moved or busy_hand) else self.stall_t + dt
+        near = math.hypot(ball.x - b.x, ball.y - (b.y - 12 * s)) < 60 * s
+        if self.overlap_t >= 0.5 or (self.stall_t >= 5.0 and near):
+            log.info("ball game: the ball %s - the cat just grabs it",
+                     "is inside the cat" if self.overlap_t >= 0.5 else "chase made no progress for 5 s")
+            self.overlap_t = self.stall_t = 0.0
+            b.plan.clear()
+            self._face(ball.x)
+            b.play_once("pounce")
+            self.jump = None
+            self._catch()
+            return True
+        if self.stall_t >= 5.0:                    # far away and not moving: start over
+            self.stall_t = 0.0
+            self.task = "idle"
+        return False
+
     def _hunt(self, dt: float, landed: bool) -> None:
         b, s, ball = self.brain, self.s, self.ball
         if landed:
@@ -439,6 +478,8 @@ class BallGame:
             self._air(dt)
             return
         if b.mode != "ground":
+            return
+        if self._unstick(dt):
             return
         if b.oneshot:                       # landing squash
             self._set_anim(None)
@@ -807,6 +848,14 @@ class BallGame:
                 self.task = "script"
                 self._next_step()
                 return
+            prev, self.auto_catch = self.auto_catch, True    # its own ball: not a new catch
+            if self._unstick(dt):                   # (its own ball under its paws: just take it)
+                if ball.attached:
+                    self.auto_catch = False
+                    self.task = "script"
+                    self._next_step()
+                return
+            self.auto_catch = prev
             if b.oneshot:
                 return
             self.own_t += dt

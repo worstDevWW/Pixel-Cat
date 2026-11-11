@@ -33,23 +33,24 @@ _CODE_RE = re.compile(r"```[ \t]*([\w+#.-]*)[ \t]*\n?(.*?)```", re.S)
 
 def md_to_html(text: str, small_px: int = 11) -> str:
     """Tiny, safe markdown subset: code blocks, inline code, bold, bullets."""
+    st = theme.current()
     parts: list[str] = []
     pos = 0
     for m in _CODE_RE.finditer(text):
         parts.append(_inline(text[pos:m.start()]))
         code = html.escape(m.group(2).rstrip("\n"))
         lang = html.escape(m.group(1))
-        label = f'<div style="color:#ffb3c6;font-size:{small_px}px">{lang}</div>' if lang else ""
-        parts.append(f'<table width="100%" cellpadding="6" cellspacing="0"><tr><td bgcolor="#2b1b2e">{label}'
-                     f'<pre style="color:#ffe6c7;font-family:Consolas,monospace;margin:0">{code}</pre></td></tr></table>')
+        label = f'<div style="color:{st.accent};font-size:{small_px}px">{lang}</div>' if lang else ""
+        parts.append(f'<table width="100%" cellpadding="6" cellspacing="0"><tr><td bgcolor="{st.code_bg}">{label}'
+                     f'<pre style="color:{st.code_fg};font-family:Consolas,monospace;margin:0">{code}</pre></td></tr></table>')
         pos = m.end()
     tail = text[pos:]
     if tail.count("```") % 2 == 1:  # unterminated block while streaming
         i = tail.index("```")
         parts.append(_inline(tail[:i]))
         code = html.escape(tail[i + 3:].split("\n", 1)[-1])
-        parts.append(f'<table width="100%" cellpadding="6" cellspacing="0"><tr><td bgcolor="#2b1b2e">'
-                     f'<pre style="color:#ffe6c7;font-family:Consolas,monospace;margin:0">{code}</pre></td></tr></table>')
+        parts.append(f'<table width="100%" cellpadding="6" cellspacing="0"><tr><td bgcolor="{st.code_bg}">'
+                     f'<pre style="color:{st.code_fg};font-family:Consolas,monospace;margin:0">{code}</pre></td></tr></table>')
     else:
         parts.append(_inline(tail))
     return "".join(parts)
@@ -57,7 +58,8 @@ def md_to_html(text: str, small_px: int = 11) -> str:
 
 def _inline(t: str) -> str:
     t = html.escape(t)
-    t = re.sub(r"`([^`\n]+)`", r'<code style="background:#f4e2d0;font-family:Consolas,monospace">\1</code>', t)
+    bg = theme.current().inline_code
+    t = re.sub(r"`([^`\n]+)`", rf'<code style="background:{bg};font-family:Consolas,monospace">\1</code>', t)
     t = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", t)
     t = re.sub(r"(?m)^\s*[-*] ", "&nbsp;• ", t)
     return t.strip("\n").replace("\n", "<br>")
@@ -69,6 +71,7 @@ GREETING = "Mrrrow~ hi hooman! (=^･ω･^=) Ask me anything, or tell me to do 
 class ChatWindow(QWidget):
     send_requested = Signal(str)
     stop_requested = Signal()
+    model_menu_requested = Signal()         # the model button next to SEND
     new_chat_requested = Signal()
     auto_toggled = Signal()
     watch_cancel_requested = Signal(int)
@@ -141,8 +144,14 @@ class ChatWindow(QWidget):
         self.input.returnPressed.connect(self._send)
         self.send_btn = QPushButton("SEND")
         self.send_btn.clicked.connect(self._send)
+        self.model_btn = QPushButton("35B")     # which AI model this chat uses (click: change it)
+        self.model_btn.setObjectName("modelBtn")
+        self.model_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.model_btn.clicked.connect(self.model_menu_requested.emit)
+        self._model_temp = False
         row = QHBoxLayout()
         row.addWidget(self.input, 1)
+        row.addWidget(self.model_btn)
         row.addWidget(self.send_btn)
         self.lay = QVBoxLayout(self)
         self.lay.addWidget(self.view, 1)
@@ -160,15 +169,17 @@ class ChatWindow(QWidget):
         """Size everything for one monitor: chrome in art pixels ``u``, fonts in device pixels."""
         self.u = max(1, u)
         u = self.u
-        self.dpi = dpi or 48 * u
+        self.dpi = dpi or int(round(48 * u / theme.size_factor()))
         self.font_px = theme.font_px_for_dpi(self.dpi, 10)
         self.small_px = theme.font_px_for_dpi(self.dpi, 8.5)
         self.setStyleSheet(theme.chat_stylesheet(max(1, u // 2 + (u % 2)), self.font_px))
-        self.confirm_label.setStyleSheet(f"color:#3a2129; font-family:'Segoe UI'; font-size:{self.font_px}px;")
-        self.watch_bar.setStyleSheet(f"color:#3a2129; background:#fff3c4; font-family:'Segoe UI'; "
+        st = theme.current()
+        self.confirm_label.setStyleSheet(f"color:{st.text}; font-family:'Segoe UI'; font-size:{self.font_px}px;")
+        self.watch_bar.setStyleSheet(f"color:{st.text}; background:{st.event_bubble}; font-family:'Segoe UI'; "
                                      f"font-size:{self.small_px}px; padding:{2 * u}px;")
-        self.model_bar.setStyleSheet(f"color:#21374a; background:#dcefff; font-family:'Segoe UI'; "
+        self.model_bar.setStyleSheet(f"color:{st.text}; background:{st.note_bubble}; font-family:'Segoe UI'; "
                                      f"font-size:{self.small_px}px; padding:{2 * u}px;")
+        self._style_model_btn()
         if getattr(self, "_watch_items", None):
             self.set_watches(self._watch_items)
         self.lay.setContentsMargins(5 * u, (7 + 8) * u, 6 * u, 6 * u)
@@ -220,16 +231,13 @@ class ChatWindow(QWidget):
         u = self.u
         theme.draw_pixel_panel(p, self.rect(), u)
         bar_h = 13 * u
-        p.fillRect(2 * u, u, self.width() - 5 * u, bar_h - u, theme.ACCENT)
-        p.fillRect(2 * u, bar_h, self.width() - 5 * u, u, theme.INK)
         if getattr(self, "_face_u", None) != (u, self.sprites.skin.key):
             self._face = self.sprites.face_icon(9 * u)
             self._face_u = (u, self.sprites.skin.key)
-        face = self._face
-        p.drawPixmap(4 * u, 2 * u, face)
-        p.drawPixmap(15 * u, 4 * u, render_text("MEOW CHAT", u, theme.INK, QColor(255, 255, 255, 120)))
+        theme.draw_title_bar(p, self.width(), u, "MEOW CHAT", self._face)
         if self.auto_mode:
-            p.drawPixmap(self._auto_rect().x() - 22 * u, 4 * u, render_text("AUTO", u, theme.INK))
+            auto = theme.text_pixmap("AUTO", u, QColor(theme.current().on_accent))
+            p.drawPixmap(self._auto_rect().x() - auto.width() - 2 * u, (bar_h - auto.height()) // 2 + u // 2, auto)
         p.drawPixmap(self._auto_rect().topLeft(), self.sprites.icon("bolt_on" if self.auto_mode else "bolt_off", u))
         p.drawPixmap(self._new_rect().topLeft(), self.sprites.icon("plus", u))
         p.drawPixmap(self._close_rect().topLeft(), self.sprites.icon("close", u))
@@ -249,6 +257,27 @@ class ChatWindow(QWidget):
         self.auto_mode = on
         self.update()
 
+    def restyle(self) -> None:
+        """The user picked another style or size: draw everything again."""
+        self.apply_scale(theme.unit_for_dpi(self.dpi), self.dpi)
+        if getattr(self, "_watch_items", None):
+            self.set_watches(self._watch_items)
+        self.update()
+
+    def set_model_chip(self, text: str, temporary: bool, tip: str) -> None:
+        """The model button: its short name; highlighted while this chat uses another model."""
+        self.model_btn.setText(text)
+        self.model_btn.setToolTip(tip)
+        self._model_temp = temporary
+        self._style_model_btn()
+
+    def _style_model_btn(self) -> None:
+        st = theme.current()
+        if getattr(self, "_model_temp", False):
+            self.model_btn.setStyleSheet(f"background:{st.accent}; color:{st.on_accent};")
+        else:
+            self.model_btn.setStyleSheet("")
+
     def set_model_banner(self, text: str | None) -> None:
         """Show what the AI is doing while it isn't ready; None hides the bar."""
         if text:
@@ -263,7 +292,8 @@ class ChatWindow(QWidget):
         if not items:
             self.watch_bar.hide()
             return
-        rows = [f'👀 {html.escape(text)} &nbsp;<a href="stop:{wid}" style="color:#b0306a">stop</a>'
+        link = theme.current().link
+        rows = [f'👀 {html.escape(text)} &nbsp;<a href="stop:{wid}" style="color:{link}">stop</a>'
                 for wid, text in items[:5]]
         if len(items) > 5:
             rows.append(f"…and {len(items) - 5} more (/watches)")
@@ -405,21 +435,22 @@ class ChatWindow(QWidget):
         self._mark()
 
     def _row_html(self, role: str, text: str) -> str:
+        st = theme.current()
         px = self.small_px
         if role == "user":
             return (f'<table width="100%" cellspacing="0" cellpadding="6"><tr><td width="18%"></td>'
-                    f'<td bgcolor="#d9ecff"><b>you</b><br>{md_to_html(text, px)}</td></tr></table>')
+                    f'<td bgcolor="{st.user_bubble}"><b>you</b><br>{md_to_html(text, px)}</td></tr></table>')
         if role == "cat":
             body = md_to_html(text, px) if text else "<i>mrrr… thinking 💭</i>"
             return (f'<table width="100%" cellspacing="0" cellpadding="6"><tr>'
-                    f'<td bgcolor="#ffe1ea"><b>🐱 cat</b><br>{body}</td><td width="10%"></td></tr></table>')
+                    f'<td bgcolor="{st.cat_bubble}"><b>🐱 cat</b><br>{body}</td><td width="10%"></td></tr></table>')
         if role == "error":
             return (f'<table width="100%" cellspacing="0" cellpadding="6"><tr>'
-                    f'<td bgcolor="#ffd6d6">{md_to_html(text, px)}</td></tr></table>')
+                    f'<td bgcolor="{st.error_bubble}">{md_to_html(text, px)}</td></tr></table>')
         if role == "event":
             return (f'<table width="100%" cellspacing="0" cellpadding="6"><tr>'
-                    f'<td bgcolor="#fff3c4">{md_to_html(text, px)}</td></tr></table>')
-        return f'<p style="color:#7a6470;font-size:{px}px">✔ {md_to_html(text, px)}</p>'
+                    f'<td bgcolor="{st.event_bubble}">{md_to_html(text, px)}</td></tr></table>')
+        return f'<p style="color:{st.muted};font-size:{px}px">✔ {md_to_html(text, px)}</p>'
 
     def _flush(self) -> None:
         """Update the view in place: only messages that changed (usually the one being
