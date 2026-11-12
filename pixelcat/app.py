@@ -50,6 +50,7 @@ from .ui.tray import Tray
 from . import games as minigames
 from .games.base import MiniGame
 from .games.qt_host import PopupWin, QtHost, art_pixmap
+from .sprites import hats as hat_art
 
 log = logging.getLogger(__name__)
 
@@ -585,7 +586,8 @@ class PixelCatApp(QObject):
             got = n <= ps.stage
             need = progress.xp_to_reach(n) - st.xp
             stages.append(MenuItem(f"pass:{n}", f"{n}. {progress.name_of(kind, key)}", "star", info=True,
-                                   locked=not got, note=kind.upper() if got else f"{need} XP",
+                                   locked=not got, note=progress.kind_label(kind, key).upper() if got
+                                   else f"{need} XP",
                                    picture=self._reward_picture(kind, key, u, hat_scale)))
         skins = []
         for key, name in progress.SKINS.items():
@@ -594,11 +596,20 @@ class PixelCatApp(QObject):
                                   note="" if ok else f"STAGE {progress.stage_of('skin', key)}",
                                   picture=self.sprites.skin_icon(key, 9 * u)))
         hats = [MenuItem("hat:", "No hat", radio=True, checked=not st.hat)]
-        for key, name in progress.HATS.items():
-            ok = progress.is_unlocked(st.xp, "hat", key)
-            hats.append(MenuItem(f"hat:{key}", name, radio=True, checked=st.hat == key, locked=not ok,
-                                 note="" if ok else f"STAGE {progress.stage_of('hat', key)}",
-                                 picture=self.sprites.hat(key, hat_scale, False)))
+        for group, title in hat_art.GROUPS.items():      # 115 hats: in groups, in unlock order
+            keys = sorted((k for k, h in hat_art.HATS.items() if h.group == group),
+                          key=lambda k: progress.stage_of("hat", k))
+            rows, got = [], 0
+            for key in keys:
+                ok = progress.is_unlocked(st.xp, "hat", key)
+                got += ok
+                tier = hat_art.TIERS.get(hat_art.HATS[key].tier, "")
+                note = (tier.upper() if tier in ("rare", "epic", "legendary") else "") if ok \
+                    else f"STAGE {progress.stage_of('hat', key)}"
+                rows.append(MenuItem(f"hat:{key}", progress.HATS[key], radio=True, checked=st.hat == key,
+                                     locked=not ok, note=note, picture=self.sprites.hat(key, hat_scale, False)))
+            worn = " - WEARING" if st.hat in keys else ""
+            hats.append(MenuItem(f"hatgroup:{group}", title, "hat", note=f"{got}/{len(keys)}{worn}", children=rows))
         return [MenuItem("pass", "Cat Pass", "star", note=f"STAGE {ps.stage}", bar=ps.fraction, children=stages),
                 MenuItem("skins", "Skins", "skin", children=skins),
                 MenuItem("hats", "Hats", "hat", children=hats)]
@@ -819,7 +830,7 @@ class PixelCatApp(QObject):
                 best = f"New record: {rounds} catches!"
             self.saved.best_round = rounds
             self.game.best = rounds
-        xp = min(90, 15 + rounds * 12) if rounds else 0
+        xp = min(80, 25 + rounds * 12) if rounds else 0
         result = f"The cat caught the ball {rounds} time{'s' if rounds != 1 else ''}!" if rounds else ""
         self._award("ball", "Play ball", xp, result, best)
 
@@ -986,7 +997,7 @@ class PixelCatApp(QObject):
             lines.append(f"<b>+{xp} XP</b> &middot; {stage}")
         ok, cancel, picture = "NICE!", None, None
         for n, kind, k in unlocks:
-            what = {"game": "minigame", "skin": "skin", "hat": "hat"}[kind]
+            what = progress.kind_label(kind, k)
             lines.append(f"<b>Stage {n}! New {what}: {html.escape(progress.name_of(kind, k))}</b>")
         if unlocks:
             n, kind, k = unlocks[-1]

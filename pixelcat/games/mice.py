@@ -48,7 +48,7 @@ class MouseHunt(MiniGame):
         return f"You {self.you} : {self.cat} Cat"
 
     def xp(self) -> int:
-        return 20 + min(60, self.you * 3) + (15 if self.you > self.cat else 0)
+        return 15 + min(45, self.you * 2) + (10 if self.you > self.cat else 0)
 
     def look_target(self) -> tuple[float, float] | None:
         m = self.target

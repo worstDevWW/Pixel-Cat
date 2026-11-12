@@ -77,10 +77,12 @@ def main() -> int:
     cos = next(it for it in m.items if it.key == "cosmetics").children
     check("Cosmetics: Cat Pass (stage + progress bar), Skins, Hats", [c.key for c in cos] == ["pass", "skins", "hats"]
           and cos[0].bar is not None and cos[0].note == "STAGE 1", str([(c.label, c.note) for c in cos]))
-    check("11 skins (only Charcoal unlocked at first), No hat + 15 hats (all locked at first)",
+    hat_rows = [h for g in cos[2].children[1:] for h in g.children]
+    check("11 skins (only Charcoal unlocked at first); No hat + 115 hats in 10 groups (all locked at first)",
           len(cos[1].children) == 11 and [c.key for c in cos[1].children if not c.locked] == ["skin:charcoal"]
-          and len(cos[2].children) == 16 and [c.key for c in cos[2].children if not c.locked] == ["hat:"],
-          str([c.key for c in cos[1].children if not c.locked]))
+          and cos[2].children[0].key == "hat:" and len(cos[2].children) == 11 and len(hat_rows) == 115
+          and not any(not h.locked for h in hat_rows) and cos[2].children[1].note == "0/10",
+          f"{len(cos[2].children) - 1} groups, {len(hat_rows)} hats, {cos[2].children[1].note}")
     check("Settings: Style, Accent color, Size, Font, AI model, then the on/off settings",
           [c.key for c in sets] == ["set_style", "set_accent", "set_size", "set_font", "set_model", "quiet",
                                     "autostart", "automode", "preload_ai"], str([c.label for c in sets]))
@@ -193,18 +195,25 @@ def main() -> int:
     check("'Put it on' wears the new skin at once", pet.saved.skin == "ginger" and pet.sprites.skin.key == "ginger")
     pet.selftest = 1
     # cosmetics: pick a skin and a hat, menu stays open
+    from pixelcat.sprites import hats as hat_art
+
     pet.saved.xp = progress.xp_to_reach(12)
-    m.expanded = {"cosmetics", "hats"}
+    first = next(k for kind, k in progress.REWARDS if kind == "hat")
+    m.expanded = {"cosmetics", "hats", f"hatgroup:{hat_art.HATS[first].group}"}
     m.items = pet._menu_items()
     m._layout()
     closed.clear()
-    m._activate(row("hat:beanie"))
-    check("Cosmetics -> Hats: a hat goes on at once and the menu stays open",
-          pet.saved.hat == "beanie" and pet.overlay.hat == "beanie" and not closed)
+    m._activate(row(f"hat:{first}"))
+    check(f"Cosmetics -> Hats -> a group: a hat ({first}) goes on at once and the menu stays open",
+          pet.saved.hat == first and pet.overlay.hat == first and not closed)
+    group_row = next(it for it, _d, _r in m._rows if it.key == f"hatgroup:{hat_art.HATS[first].group}")
+    check("the group shows how many of its hats you have (and that you wear one of them)",
+          group_row.note.endswith("WEARING") and group_row.note.split("/")[0] != "0", group_row.note)
     m._activate(row("hat:"))
     check("'No hat' takes it off", pet.saved.hat == "" and pet.overlay.hat == "")
-    m._activate(row("hat:crown"))
-    check("a locked hat can't be worn", pet.saved.hat == "")
+    locked = next(it.key for it, _d, _r in m._rows if it.key.startswith("hat:") and it.locked)
+    m._activate(row(locked))
+    check(f"a locked hat ({locked[4:]}) can't be worn", pet.saved.hat == "")
     m.expanded = {"cosmetics", "skins"}
     m.items = pet._menu_items()
     m._layout()
@@ -221,9 +230,36 @@ def main() -> int:
                                                                            for it in stages),
           str([(it.label, it.note) for it in stages]))
     render("menu_cosmetics.png")
-    m.expanded = {"cosmetics", "hats"}
+    m.expanded = {"cosmetics", "hats", "hatgroup:magic"}
     m.items = pet._menu_items()
     render("menu_hats.png")
+    # a menu taller than the screen scrolls
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    m.u = 3
+    m._work = (0, 0, 1200, 700)
+    m.expanded = {"cosmetics", "hats", "hatgroup:magic"}
+    m.items = pet._menu_items()
+    m._reposition()
+    tall = m._content_h
+    check("a menu taller than the screen fits on it and scrolls", m.height() <= 700 and m._scroll_max > 0
+          and tall > 700, f"content {tall}px, window {m.height()}px")
+    y = m._view_top() + 5
+    before = m._row_at(QPoint(40, y))
+    m.wheelEvent(QWheelEvent(QPointF(40, y), QPointF(40, y), QPoint(0, 0), QPoint(0, -240), Qt.MouseButton.NoButton,
+                             Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
+    after = m._row_at(QPoint(40, y))
+    check("the mouse wheel scrolls the rows (the header stays)", m._scroll > 0 and after > before,
+          f"scroll {m._scroll}, row {before} -> {after}")
+    m._hover = 0
+    for _ in range(len(m._rows) - 1):
+        m.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier))
+    r = m._rows[m._hover][2]
+    check("arrow keys scroll to the highlighted row", m._view_top() <= r.top() - m._scroll
+          and r.bottom() - m._scroll <= m._view_bottom(), f"row {m._hover}, scroll {m._scroll}")
+    m._scroll = 0
+    m._work = (0, 0, 1920, 1080)
     pet._set_skin("charcoal")
     pet.saved.xp = 0
     # a game: menu closes, the game starts

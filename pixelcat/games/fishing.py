@@ -73,7 +73,7 @@ class Fishing(MiniGame):
 
     def xp(self) -> int:
         new = sum(1 for k in set(self.caught) if self.ctx.get("_new_" + k))
-        return min(130, 15 + sum(SPECIES_BY_KEY[k].rarity * 7 for k in self.caught) + new * 8)
+        return min(65, 10 + sum(SPECIES_BY_KEY[k].rarity * 3 for k in self.caught) + new * 4)
 
     def look_target(self) -> tuple[float, float] | None:
         sp = self.fish or self.bobber

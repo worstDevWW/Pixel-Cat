@@ -45,7 +45,7 @@ class TreatGame(MiniGame):
         return (f"Treats {self.left} · Caught {self.caught} · Streak {self.streak} · Wind {arrow * max(1, int(abs(self.wind) * 3 + 0.5))}")
 
     def xp(self) -> int:
-        return 20 + self.caught * 6 + self.best_streak * 3
+        return 15 + self.caught * 5 + min(15, self.best_streak * 2)
 
     def look_target(self) -> tuple[float, float] | None:
         sp = self.flying or self.held

@@ -1,7 +1,8 @@
 """The cat's right-click menu, drawn in the current UI style (pixel or smooth).
 
 It is a Qt popup (closes when clicking elsewhere), placed by the caller in the nearest
-free space next to the cat and always kept inside the monitor work area.  Sections
+free space next to the cat and always kept inside the monitor work area - when it is
+taller than the screen (all those hats), the rows scroll with the mouse wheel.  Sections
 (items with children) fold open in place, also inside other sections.  Settings
 (toggles, radio choices, colour swatches) apply at once and keep the menu open, so a
 new style is visible right away.
@@ -11,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPixmap
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPixmap, QTransform, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from ..sprites.library import SpriteLibrary
@@ -67,6 +68,9 @@ class PixelMenu(QWidget):
         self._avoid: Rect = (0, 0, 0, 0)
         self._pic_w = 0
         self._work: Rect = (0, 0, 1920, 1080)
+        self._scroll = 0                 # px the rows are scrolled up (menu taller than the screen)
+        self._scroll_max = 0
+        self._content_h = 0
 
     # ------------------------------------------------------------- layout
     def _visible(self) -> list[tuple[MenuItem, int]]:
@@ -124,6 +128,7 @@ class PixelMenu(QWidget):
         self.u = max(1, u)
         self._avoid, self._work = avoid, work
         self._hover = -1
+        self._scroll = 0
         self._reposition()
         self.show()
         self.activateWindow()
@@ -131,6 +136,11 @@ class PixelMenu(QWidget):
 
     def _reposition(self) -> None:
         w, h = self._layout()
+        self._content_h = h
+        max_h = max(60 * self.u, self._work[3] - self._work[1] - 8 * self.u)
+        self._scroll_max = max(0, h - max_h)       # too tall for the screen: the rows scroll
+        self._scroll = max(0, min(self._scroll, self._scroll_max))
+        h = min(h, max_h)
         x, y = place_near(self._avoid, (w, h), self._work, gap=4 * self.u)
         q = phys_to_qt(x, y)
         self.setGeometry(q.x(), q.y(), w, h)
@@ -158,6 +168,9 @@ class PixelMenu(QWidget):
             p.drawPixmap(pad + u, pad + title_h + u, theme.text_pixmap(self.subtitle, self._small_u(), theme.MUTED))
         line = u if st.pixel else max(1, u // 2)
         p.fillRect(pad, self._sep_y, self.width() - 2 * pad - u, line, theme.INK if st.pixel else theme.PAPER_DARK)
+        p.save()
+        p.setClipRect(QRect(0, self._view_top(), self.width(), self._view_bottom() - self._view_top()))
+        p.translate(0, -self._scroll)
         for i, (it, depth, r) in enumerate(self._rows):
             if it.separator_before:
                 p.fillRect(r.x() + 2 * u, r.y() - 2 * u, r.width() - 4 * u, line, theme.PAPER_DARK)
@@ -217,10 +230,56 @@ class PixelMenu(QWidget):
             if it.children:
                 arrow = "arrow_down" if it.key in self.expanded else "arrow"
                 p.drawPixmap(r.right() - 11 * u, cy, self.sprites.icon(arrow, u))
+        p.restore()
+        if self._scroll_max:                 # more above / below: little arrows
+            down = self.sprites.icon("arrow_down", u)
+            mid = (self.width() - down.width()) // 2
+            if self._scroll > 0:
+                up = down.transformed(QTransform().scale(1, -1))
+                p.drawPixmap(mid, self._view_top(), up)
+            if self._scroll < self._scroll_max:
+                p.drawPixmap(mid, self._view_bottom() - down.height(), down)
         p.end()
+
+    # ------------------------------------------------------------- scrolling
+    def _view_top(self) -> int:
+        return self._sep_y + 2 * self.u
+
+    def _view_bottom(self) -> int:
+        return self.height() - 4 * self.u
+
+    def _row_h(self) -> int:
+        return self._rows[0][2].height() if self._rows else 13 * self.u
+
+    def _scroll_to(self, value: int) -> None:
+        value = max(0, min(int(value), self._scroll_max))
+        if value != self._scroll:
+            self._scroll = value
+            self.update()
+
+    def _ensure_visible(self, i: int) -> None:
+        if not (0 <= i < len(self._rows)) or not self._scroll_max:
+            return
+        r = self._rows[i][2]
+        top, bottom = self._view_top() + self._scroll, self._view_bottom() + self._scroll
+        if r.top() < top:
+            self._scroll_to(self._scroll - (top - r.top()))
+        elif r.bottom() > bottom:
+            self._scroll_to(self._scroll + (r.bottom() - bottom))
+
+    def wheelEvent(self, e: QWheelEvent) -> None:
+        if not self._scroll_max:
+            return
+        steps = e.angleDelta().y() / 120
+        self._scroll_to(self._scroll - steps * 2 * self._row_h())
+        self._hover = -1
+        self.mouseMoveEvent(e)  # type: ignore[arg-type]   (light up the row now under the pointer)
 
     # ------------------------------------------------------------- input
     def _row_at(self, pos: QPoint) -> int:
+        if not self._view_top() <= pos.y() < self._view_bottom():
+            return -1
+        pos = QPoint(pos.x(), pos.y() + self._scroll)
         for i, (_it, _d, r) in enumerate(self._rows):
             if r.contains(pos):
                 return i
@@ -258,12 +317,26 @@ class PixelMenu(QWidget):
     def _activate(self, i: int) -> None:
         it = self._rows[i][0]
         if it.children:
-            if it.key in self.expanded:
+            screen_y = self._rows[i][2].top() - self._scroll
+            opening = it.key not in self.expanded
+            if not opening:
                 self.expanded.discard(it.key)
             else:                    # one section open at a time per level: the menu stays short
                 self.expanded -= {o.key for o in self._siblings(it.key) if o is not it}
                 self.expanded.add(it.key)
             self._reposition()
+            # keep the clicked row where it was; when opening, show as much of the section as fits
+            j = next((k for k, (o, _d, _r) in enumerate(self._rows) if o.key == it.key), -1)
+            if j >= 0 and self._scroll_max:
+                r = self._rows[j][2]
+                self._scroll_to(r.top() - screen_y)
+                if opening:
+                    last = j + len(it.children)
+                    if last < len(self._rows):
+                        over = self._rows[last][2].bottom() - (self._view_bottom() + self._scroll)
+                        room = r.top() - (self._view_top() + self._scroll)
+                        if over > 0:
+                            self._scroll_to(self._scroll + min(over, room))
             return
         if it.inert:
             return
@@ -283,6 +356,7 @@ class PixelMenu(QWidget):
                 self._hover = (self._hover + step) % len(self._rows)
                 if not self._rows[self._hover][0].inert:
                     break
+            self._ensure_visible(self._hover)
             self.update()
         elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space) and self._hover >= 0:
             self._activate(self._hover)

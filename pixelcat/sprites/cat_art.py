@@ -532,7 +532,8 @@ def _put_on(cv: Canvas, hat: object, c: int, ht: int) -> tuple[Canvas, int, int]
     rows = hat.rows  # type: ignore[attr-defined]
     wp, hp = max(len(r) for r in rows), len(rows)
     hc = hats.hat_canvas_of(hat)  # type: ignore[arg-type]
-    left = c - (wp - 1) // 2 + hat.dx - 1  # type: ignore[attr-defined]
+    anchor = hat.ax if hat.ax >= 0 else (wp - 1) // 2  # type: ignore[attr-defined]
+    left = c - anchor + hat.dx - 1  # type: ignore[attr-defined]
     top = ht + hat.seat - (hp - 1) - 1  # type: ignore[attr-defined]
     pl, pt = max(0, 1 - left), max(0, 1 - top)
     pr = max(0, left + hc.w + 1 - cv.w)

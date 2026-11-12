@@ -46,7 +46,7 @@ class HideSeek(MiniGame):
         return f"Round {max(1, self.round)}/{ROUNDS} · close your eyes!"
 
     def xp(self) -> int:
-        return 20 + min(80, int(sum(max(0.0, 25 - t) for t in self.times)))
+        return 15 + min(65, int(sum(max(0.0, 20 - t) for t in self.times) * 0.8))
 
     def on_cat_click(self) -> bool:
         if self.phase == "hidden":

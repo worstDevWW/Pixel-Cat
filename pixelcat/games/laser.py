@@ -46,7 +46,7 @@ class LaserGame(MiniGame):
         return f"Pounces {self.pounces} · Energy {int(self.energy)}%"
 
     def xp(self) -> int:
-        return 25 + min(70, self.pounces * 5)
+        return 15 + min(65, self.pounces * 5)
 
     def tick(self, dt: float) -> None:
         b, s = self.brain, self.s

@@ -52,7 +52,7 @@ class KnockGame(MiniGame):
         return f"Saved {self.saved} · Lives " + "♥" * self.lives
 
     def xp(self) -> int:
-        return 20 + min(70, self.saved * 4)
+        return 15 + min(70, self.saved * 4)          # (the longest game: up to 85)
 
     def time_up(self) -> None:
         self.finish(f"Time! {self.saved} things saved.")

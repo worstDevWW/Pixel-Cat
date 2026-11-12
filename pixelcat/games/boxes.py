@@ -57,7 +57,7 @@ class BoxFort(MiniGame):
         return f"Boxes {len(self.boxes)} · Fits {self.fits} · Tallest tower {self.tower}"
 
     def xp(self) -> int:
-        return 15 + min(40, self.fits * 6) + self.tower * 8 + min(30, int(self.t / 10))
+        return min(80, 15 + min(30, self.fits * 5) + min(25, self.tower * 6) + min(20, int(self.t / 6)))
 
     # boxes ---------------------------------------------------------------------
     def _add_box(self, x: float | None = None) -> None:
